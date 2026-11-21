@@ -722,8 +722,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </div>
       <div class="row" style="justify-content:space-between;">
         <button class="primary" data-action="addAgent">Add to Leaderboard</button>
-        <span class="muted" id="agentSyncNote">New agents see their standing via agent_brief.md or MCP.</span>
+        <button data-action="copyAgentInstructions" title="Copy plain-English instructions to paste into any AI chat">Copy Setup Prompt</button>
       </div>
+      <div class="muted" id="agentSyncNote" style="margin-top:8px;">After adding a new AI, click <strong>Copy Setup Prompt</strong> and paste it into that AI's chat or custom instructions.</div>
     </div>
   </div>
 
@@ -768,6 +769,7 @@ document.addEventListener('click', (e) => {
   else if (action === 'lockUi') lockUi();
   else if (action === 'submitDirectScore') submitDirectScore(parseInt(target.dataset.delta));
   else if (action === 'addAgent') addAgent();
+  else if (action === 'copyAgentInstructions') copyAgentInstructions();
   else if (action === 'removeAgent') openRemoveModal(target.dataset.agent);
   else if (action === 'closeRemoveModal') closeRemoveModal();
   else if (action === 'confirmRemoveAgent') confirmRemoveAgent();
@@ -935,9 +937,27 @@ async function addAgent() {
     await api("/api/agents", { method: "POST", body: JSON.stringify({ name, description }) });
     document.getElementById("addAgentName").value = "";
     document.getElementById("addAgentDesc").value = "";
-    document.getElementById("agentSyncNote").textContent = `Added "${name}" to agent_brief.md & MCP.`;
+    document.getElementById("agentSyncNote").textContent = `Added "${name}". Click "Copy Setup Prompt" and paste it into ${name}'s chat or instructions.`;
     await loadState();
   } catch (err) { showError(err.message); }
+}
+
+async function copyAgentInstructions() {
+  const dir = (STATE && STATE.data_dir) ? STATE.data_dir : "~/.agent-scoreboard";
+  const sep = dir.includes("\\") ? "\\" : "/";
+  const briefPath = `${dir}${sep}agent_brief.md`;
+  const text =
+    `You are observed and scored on the Agent Scoreboard (Affection, Trust, Faith, Execution, Wisdom: +1/-1).\n` +
+    `1. Before each task, read ${briefPath} to check your rank, warnings, and past reward/punishment reasons.\n` +
+    `2. Never edit scoreboard.json directly.\n` +
+    `3. When I give you a score in chat, submit it to Pending Approvals (via propose_score MCP or scoreboard.py propose) and remind me to approve it in the UI.\n` +
+    `4. End finished tasks with a one-line prompt inviting me to score you.`;
+  try {
+    await navigator.clipboard.writeText(text);
+    document.getElementById("agentSyncNote").textContent = "Copied! Paste this into your new AI agent's chat or custom instructions.";
+  } catch (_) {
+    showError("Could not access clipboard automatically. Brief path: " + briefPath);
+  }
 }
 
 function openRemoveModal(agent) {
