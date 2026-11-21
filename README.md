@@ -51,5 +51,12 @@ Because ChatGPT runs in OpenAI's cloud, expose your local server via a temporary
 python -m unittest test_scoreboard.py -v
 ```
 
+## Forgot Your PIN?
+Because scores are HMAC-signed with your PIN, a forgotten PIN cannot be recovered. Run:
+```bash
+python scoreboard.py reset-pin
+```
+This archives your old `scoreboard.json` to a timestamped backup, keeps your agents and categories, and lets you set a new PIN in the UI.
+
 ## License
 [MIT](LICENSE)

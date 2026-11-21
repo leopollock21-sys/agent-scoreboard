@@ -296,6 +296,17 @@ class TestHttpAndMcp(unittest.TestCase):
         self.assertNotIn("Research Subagent", names)
         self.assertNotIn("Research Subagent", self.store.brief_path.read_text(encoding="utf-8"))
 
+    def test_reset_pin_archives_and_keeps_agents(self) -> None:
+        self.store.set_pin("1111")
+        self.store.add_agent("MyAgent", "Custom", "1111")
+        self.store.record_score(agent="MyAgent", category="Trust", delta=1, reason="Honest", pin="1111")
+        backup = self.store.reset_pin_and_archive()
+        self.assertTrue(backup.exists())
+        board = self.store.build_leaderboard()
+        self.assertFalse(board["has_pin"])
+        self.assertTrue(board["integrity"]["ok"])
+        self.assertIn("MyAgent", [r["agent"] for r in board["leaderboard"]])
+
 
 if __name__ == "__main__":
     unittest.main()

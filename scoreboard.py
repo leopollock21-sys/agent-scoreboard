@@ -304,6 +304,21 @@ class ScoreboardStore:
                 self._write_json(self.scoreboard_path, data)
                 self.regenerate_brief()
 
+    def reset_pin_and_archive(self) -> Path:
+        """Archive current scoreboard.json and clear PIN/ledger while keeping agents & categories."""
+        with self._lock:
+            with FileLock(self.scoreboard_path):
+                data = self.load_scoreboard()
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                backup_path = self.data_dir / f"scoreboard.backup.{stamp}.json"
+                self._write_json(backup_path, data)
+                data["pin_salt"] = None
+                data["pin_hash"] = None
+                data["ledger"] = []
+                self._write_json(self.scoreboard_path, data)
+                self.regenerate_brief()
+                return backup_path
+
     def record_score(
         self,
         *,
@@ -715,7 +730,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="card">
       <h2>Add Agent</h2>
       <div class="row" style="margin-bottom:10px;">
-        <input type="text" id="addAgentName" placeholder="Agent or subagent name (e.g. Walkthrough Verifier)" style="flex:1;">
+        <input type="text" id="addAgentName" placeholder="Agent name (or comma-separated list: research, browser)" style="flex:1;">
       </div>
       <div class="row" style="margin-bottom:10px;">
         <input type="text" id="addAgentDesc" placeholder="Short role description" style="flex:1;">
@@ -930,14 +945,17 @@ async function resolvePending(id, actionType) {
 
 async function addAgent() {
   if (!requireUnlockedPin()) return;
-  const name = document.getElementById("addAgentName").value.trim();
+  const raw = document.getElementById("addAgentName").value.trim();
   const description = document.getElementById("addAgentDesc").value.trim();
-  if (!name) { showError("Enter an agent name."); return; }
+  const names = raw.split(",").map(s => s.trim()).filter(Boolean);
+  if (!names.length) { showError("Enter an agent name."); return; }
   try {
-    await api("/api/agents", { method: "POST", body: JSON.stringify({ name, description }) });
+    for (const name of names) {
+      await api("/api/agents", { method: "POST", body: JSON.stringify({ name, description }) });
+    }
     document.getElementById("addAgentName").value = "";
     document.getElementById("addAgentDesc").value = "";
-    document.getElementById("agentSyncNote").textContent = `Added "${name}". Click "Copy Setup Prompt" and paste it into ${name}'s chat or instructions.`;
+    document.getElementById("agentSyncNote").textContent = `Added ${names.length} agent(s). Click "Copy Setup Prompt" to share instructions.`;
     await loadState();
   } catch (err) { showError(err.message); }
 }
@@ -1277,6 +1295,8 @@ def main(argv: list[str] | None = None) -> int:
     p_prop.add_argument("--reason", required=True)
     p_prop.add_argument("--by", default="agent")
 
+    sub.add_parser("reset-pin", help="Archive scoreboard and reset forgotten PIN (keeps agents & categories)")
+
     args = parser.parse_args(argv)
     store = ScoreboardStore(args.data_dir)
 
@@ -1301,6 +1321,12 @@ def main(argv: list[str] | None = None) -> int:
             proposed_by=args.by,
         )
         print(json.dumps({"ok": True, "proposal": prop}, indent=2))
+        return 0
+
+    if args.cmd == "reset-pin":
+        backup = store.reset_pin_and_archive()
+        print(f"PIN reset. Old scoreboard archived to: {backup}")
+        print("Open the Leaderboard UI and set a new Owner PIN.")
         return 0
 
     return 1
