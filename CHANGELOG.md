@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-11-21
+### Added
+- Apple-inspired dark interface with Leaderboard, Backup, FAQ, and About Us tabs.
+- Company and app branding assets, automatic backup listing, and JSON backup downloads.
+- Chromium app-window launch when Microsoft Edge or Google Chrome is available.
+- Local-only HTTP routes for approved brand assets and scoreboard backups.
+- Tests for brand assets, backup listing, backup downloads, and path traversal rejection.
+
 ## [1.0.0] - 2026-11-21
 ### Added
 - Zero-dependency Python 3 core engine and local Leaderboard Web UI (`scoreboard.py`).

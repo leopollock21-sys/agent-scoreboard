@@ -15,6 +15,8 @@ import json
 import errno
 import os
 import secrets
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -36,6 +38,7 @@ DEFAULT_AGENTS = [
 ]
 DEFAULT_PORT = 8787
 PBKDF2_ITERATIONS = 100_000
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 
 def get_data_dir(override: str | None = None) -> Path:
@@ -206,6 +209,18 @@ class ScoreboardStore:
     def load_pending(self) -> list[dict[str, Any]]:
         with open(self.pending_path, "r", encoding="utf-8") as f:
             return json.load(f).get("pending", [])
+
+    def list_backups(self) -> list[dict[str, Any]]:
+        """List automatic PIN reset backups with UTC modification timestamps."""
+        backups = []
+        for path in sorted(self.data_dir.glob("scoreboard.backup.*.json"), key=lambda item: item.name):
+            modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            backups.append({
+                "name": path.name,
+                "size": path.stat().st_size,
+                "modified_utc": modified.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+        return backups
 
     def set_pin(self, pin: str):
         pin = (pin or "").strip()
@@ -592,98 +607,92 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent Scoreboard</title>
 <style>
-  :root {
-    --bg: #0f1117;
-    --card: #171b24;
-    --border: #262c3a;
-    --text: #eef1f6;
-    --muted: #9aa4b6;
-    --accent: #3b82f6;
-    --green: #22c55e;
-    --red: #ef4444;
-    --amber: #f59e0b;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    line-height: 1.5;
-  }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
-  header {
-    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
-    gap: 16px; margin-bottom: 24px;
-  }
-  h1 { margin: 0; font-size: 24px; letter-spacing: -0.02em; }
-  .sub { color: var(--muted); font-size: 14px; margin-top: 4px; }
-  .card {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 12px; padding: 20px; margin-bottom: 20px;
-  }
-  .card h2 { margin: 0 0 12px; font-size: 16px; }
-  .banner {
-    padding: 14px 16px; border-radius: 10px; margin-bottom: 20px;
-    font-weight: 600; display: none;
-  }
-  .banner.tamper { background: rgba(239, 68, 68, 0.18); border: 1px solid var(--red); color: #fecaca; }
-  .banner.error { background: rgba(245, 158, 11, 0.16); border: 1px solid var(--amber); color: #fde68a; }
-  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-  input, select {
-    background: #0d1016; color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px 12px; min-height: 44px; font-size: 14px;
-  }
-  button {
-    min-height: 44px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
-    background: #232a38; color: var(--text); font-weight: 600; cursor: pointer; font-size: 14px;
-  }
-  button:hover { filter: brightness(1.12); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.good { background: rgba(34, 197, 94, 0.16); border-color: var(--green); color: #86efac; }
-  button.bad { background: rgba(239, 68, 68, 0.16); border-color: var(--red); color: #fca5a5; }
-  button.mini { min-height: 30px; padding: 2px 8px; font-size: 12px; border-radius: 6px; }
-  .badge {
-    display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700;
-  }
-  .badge.TRUSTED { background: rgba(34, 197, 94, 0.18); color: #86efac; }
-  .badge.ACTIVE { background: rgba(59, 130, 246, 0.18); color: #93c5fd; }
-  .badge.WARNING { background: rgba(239, 68, 68, 0.22); color: #fca5a5; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 12px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
-  th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .cat-cell { white-space: nowrap; }
-  .score-pos { color: #86efac; font-weight: 700; }
-  .score-neg { color: #fca5a5; font-weight: 700; }
-  .score-zero { color: var(--muted); }
-  .pending-item {
-    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
-    gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px;
-    background: #121620;
-  }
-  .empty { color: var(--muted); font-size: 14px; padding: 12px 0; }
-  .history-item {
-    padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px;
-    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px;
-  }
-  .muted { color: var(--muted); font-size: 13px; }
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  @media (max-width: 820px) { .grid-2 { grid-template-columns: 1fr; } }
+  :root { color-scheme: dark; --bg:#0c0d10; --card:#14161b; --line:rgba(255,255,255,.08); --text:#f5f5f7; --muted:#9b9da5; --accent:#0a84ff; --green:#30d158; --red:#ff453a; --amber:#ffd60a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1160px; margin:0 auto; padding:30px 24px 24px; }
+  header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:18px; margin-bottom:26px; }
+  .brand { display:flex; align-items:center; gap:14px; min-width:240px; }
+  .app-icon { width:40px; height:40px; border-radius:11px; object-fit:cover; }
+  h1 { margin:0; font-size:23px; line-height:1.2; letter-spacing:-.035em; font-weight:650; }
+  .sub { color:var(--muted); font-size:13px; margin-top:5px; overflow-wrap:anywhere; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:24px; margin-bottom:16px; box-shadow:0 12px 36px rgba(0,0,0,.12); }
+  .card h2 { margin:0 0 16px; font-size:17px; letter-spacing:-.015em; }
+  .banner { padding:14px 16px; border-radius:12px; margin-bottom:16px; font-weight:600; display:none; }
+  .banner.tamper { background:rgba(255,69,58,.12); border:1px solid var(--red); color:#ffb4ad; }
+  .banner.error { background:rgba(255,214,10,.1); border:1px solid var(--amber); color:#ffe985; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  input,select { background:#0d0f13; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px 13px; min-height:44px; font-size:14px; }
+  button { min-height:44px; padding:9px 15px; border-radius:11px; border:1px solid var(--line); background:#202229; color:var(--text); font-weight:600; cursor:pointer; font-size:14px; transition:background .15s ease,border-color .15s ease; }
+  button:hover { background:#2a2c34; }
+  button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.good { background:rgba(48,209,88,.12); border-color:rgba(48,209,88,.38); color:#78e995; }
+  button.bad { background:rgba(255,69,58,.12); border-color:rgba(255,69,58,.38); color:#ff938c; }
+  button.mini { min-width:44px; min-height:44px; padding:7px 10px; font-size:13px; border-radius:10px; }
+  .badge { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .badge.TRUSTED { background:rgba(48,209,88,.16); color:#78e995; }
+  .badge.ACTIVE { background:rgba(10,132,255,.17); color:#7dbbff; }
+  .badge.WARNING { background:rgba(255,69,58,.18); color:#ff938c; }
+  .segmented { display:flex; gap:4px; width:max-content; max-width:100%; overflow-x:auto; padding:4px; margin:0 0 22px; border:1px solid var(--line); border-radius:14px; background:#111216; }
+  .segmented button { flex:0 0 auto; min-height:44px; padding:8px 18px; border:0; background:transparent; color:var(--muted); border-radius:10px; }
+  .segmented button[aria-selected="true"] { background:#2a2b31; color:var(--text); box-shadow:0 1px 4px rgba(0,0,0,.25); }
+  .tab-panel[hidden] { display:none; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { padding:13px 10px; text-align:left; border-bottom:1px solid var(--line); font-size:14px; }
+  th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .cat-cell { white-space:nowrap; }
+  .score-pos { color:#78e995; font-weight:700; }
+  .score-neg { color:#ff938c; font-weight:700; }
+  .score-zero,.muted { color:var(--muted); }
+  .muted { font-size:13px; }
+  .pending-item { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:15px; border:1px solid var(--line); border-radius:12px; margin-bottom:10px; background:#111318; }
+  .empty { color:var(--muted); font-size:14px; padding:12px 0; }
+  .history-item,.backup-item { padding:14px 0; border-bottom:1px solid var(--line); font-size:14px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .faq-item { padding:18px 0; border-bottom:1px solid var(--line); }
+  .faq-item:first-of-type { padding-top:0; }
+  .faq-item:last-child { border:0; padding-bottom:0; }
+  .faq-item h3 { margin:0 0 6px; font-size:15px; }
+  .faq-item p { margin:0; color:var(--muted); }
+  .about-brand { display:flex; align-items:center; gap:24px; flex-wrap:wrap; }
+  .company-logo { width:min(260px,100%); max-height:112px; object-fit:contain; background:#fff; border-radius:12px; padding:14px; }
+  .about-meta { display:grid; gap:9px; color:var(--muted); }
+  .about-meta a { color:#7dbbff; }
+  a.button { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:9px 15px; border:1px solid var(--line); border-radius:11px; background:#202229; color:var(--text); font-size:14px; font-weight:600; text-decoration:none; }
+  a.button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  a.button.mini { padding:7px 12px; font-size:13px; }
+  footer { display:flex; justify-content:center; align-items:center; gap:9px; padding:24px 8px 4px; color:var(--muted); font-size:12px; }
+  .footer-logo { width:22px; height:22px; object-fit:contain; border-radius:5px; }
+  dialog { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:16px; padding:24px; }
+  dialog::backdrop { background:rgba(0,0,0,.65); backdrop-filter:blur(4px); }
+  @media (max-width:760px) { .wrap{padding:20px 14px;} .grid-2{grid-template-columns:1fr;} .card{padding:19px;} .segmented{width:100%;} .segmented button{padding-inline:14px;} }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div>
+    <div class="brand">
+      <img class="app-icon" src="/assets/app_icon.png" alt="Agent Scoreboard app icon">
+      <div>
       <h1>Agent Scoreboard</h1>
       <div class="sub" id="subtitle">Loading scoreboard...</div>
+      </div>
     </div>
     <div class="row" id="pinControls"></div>
   </header>
 
+  <nav class="segmented" role="tablist" aria-label="Main navigation">
+    <button role="tab" id="tab-board" aria-selected="true" aria-controls="panel-board" data-tab="board">Leaderboard</button>
+    <button role="tab" id="tab-backup" aria-selected="false" aria-controls="panel-backup" data-tab="backup">Backup</button>
+    <button role="tab" id="tab-faq" aria-selected="false" aria-controls="panel-faq" data-tab="faq">FAQ</button>
+    <button role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about" data-tab="about">About Us</button>
+  </nav>
+
   <div class="banner tamper" id="tamperBanner"></div>
   <div class="banner error" id="errorBanner"></div>
 
+  <main class="tab-panel" id="panel-board" role="tabpanel" aria-labelledby="tab-board">
   <div class="card" id="pinSetupCard" style="display:none;">
     <h2>Set Your Owner PIN</h2>
     <p class="muted">Create a private PIN (4+ characters). Agents cannot approve or edit scores without it, and every official score is signed with it.</p>
@@ -747,6 +756,40 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <h2>Recent Approved History</h2>
     <div id="historyList" class="empty">No scores recorded yet.</div>
   </div>
+  </main>
+
+  <section class="tab-panel" id="panel-backup" role="tabpanel" aria-labelledby="tab-backup" hidden>
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <div><h2 style="margin-bottom:5px;">Backups</h2><div class="muted">Automatic snapshots created when you reset a forgotten PIN.</div></div>
+        <a class="button primary" href="/api/backup/download">Download Current Backup (.json)</a>
+      </div>
+    </div>
+    <div class="card"><h2>Automatic Forgot PIN? Backups</h2><div id="backupList" class="empty" aria-live="polite">Loading backups…</div></div>
+  </section>
+
+  <section class="tab-panel" id="panel-faq" role="tabpanel" aria-labelledby="tab-faq" hidden>
+    <div class="card">
+      <h2>Frequently Asked Questions</h2>
+      <div class="faq-item"><h3>How does scoring work?</h3><p>Each approved reward adds one point and each punishment removes one point in one of five categories. Every official entry keeps its reason in the recent history.</p></div>
+      <div class="faq-item"><h3>How does tamper protection work?</h3><p>Entries are linked in a SHA-256 chain and signed with your Owner PIN. The scoreboard checks the chain and reports changes that break its integrity.</p></div>
+      <div class="faq-item"><h3>What is agent_brief.md?</h3><p>It is a plain-text summary of agent standings, warnings, and recent reasons. Agents can read it before a task to understand their current feedback.</p></div>
+      <div class="faq-item"><h3>How do I connect a new AI agent?</h3><p>Add its name and role on the Leaderboard tab, then select Copy Setup Prompt and paste the instructions into that agent’s chat or custom instructions.</p></div>
+      <div class="faq-item"><h3>What happens if I forgot my PIN?</h3><p>Select Forgot PIN? in the header. The current scores are saved as a downloadable backup, your agents are kept, and you can set a new PIN.</p></div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="panel-about" role="tabpanel" aria-labelledby="tab-about" hidden>
+    <div class="card">
+      <h2>About Us</h2>
+      <div class="about-brand">
+        <img class="company-logo" src="/assets/chinlung_logo.png" alt="Chinlung Technologies company logo">
+        <div class="about-meta"><strong style="color:var(--text);font-size:18px;">Chinlung Technologies</strong><span>Agent Scoreboard v1.1.0</span><span>MIT License</span><a href="https://github.com/leopollock21-sys/agent-scoreboard" target="_blank" rel="noopener noreferrer">View on GitHub</a></div>
+      </div>
+    </div>
+  </section>
+
+  <footer><img class="footer-logo" src="/assets/chinlung_logo.png" alt=""><span>Chinlung Technologies • Agent Scoreboard v1.1.0</span></footer>
 </div>
 
 <dialog id="removeModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:420px; width:92%;">
@@ -783,6 +826,8 @@ let QUICK_CTX = null;
 let REMOVE_TARGET = null;
 
 document.addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-tab]');
+  if (tab) { changeTab(tab.dataset.tab); return; }
   const target = e.target.closest('[data-action]');
   if (!target) return;
   const action = target.dataset.action;
@@ -804,7 +849,39 @@ document.addEventListener('click', (e) => {
   else if (action === 'closeQuickModal') closeQuickModal();
   else if (action === 'confirmQuickScore') confirmQuickScore();
   else if (action === 'resolvePending') resolvePending(target.dataset.pendingId, target.dataset.actionType);
+  else if (action === 'loadBackups') loadBackups();
 });
+
+function changeTab(name) {
+  for (const tabName of ['board', 'backup', 'faq', 'about']) {
+    const selected = tabName === name;
+    document.getElementById(`tab-${tabName}`).setAttribute('aria-selected', String(selected));
+    document.getElementById(`panel-${tabName}`).hidden = !selected;
+  }
+  if (name === 'backup') loadBackups();
+}
+
+async function loadBackups() {
+  const list = document.getElementById('backupList');
+  list.className = 'empty';
+  list.textContent = 'Loading backups…';
+  try {
+    const data = await api('/api/backups');
+    if (!data.backups.length) {
+      list.textContent = 'No automatic backups yet. A backup is created whenever you reset a forgotten PIN.';
+      return;
+    }
+    list.className = '';
+    list.innerHTML = data.backups.map(item => `
+      <div class="backup-item">
+        <div><strong>${escapeHtml(item.name)}</strong><div class="muted">${escapeHtml(item.modified_utc)} · ${(item.size / 1024).toFixed(1)} KB</div></div>
+        <a class="button mini" href="/api/backup/download?file=${encodeURIComponent(item.name)}">Download</a>
+      </div>`).join('');
+  } catch (err) {
+    list.className = 'empty';
+    list.innerHTML = `Could not load backups: ${escapeHtml(err.message)} <button class="mini" data-action="loadBackups">Retry</button>`;
+  }
+}
 
 function getPin() { return sessionStorage.getItem("agent_scoreboard_pin") || ""; }
 function setSessionPin(pin) {
@@ -1166,6 +1243,26 @@ def make_handler(store: ScoreboardStore):
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Access denied over tunnel"})
                 return
 
+            if parsed.path == "/favicon.ico":
+                asset_name = "app_icon.ico"
+                asset_path = ASSETS_DIR / asset_name
+                self._send_asset(asset_path, "image/x-icon")
+                return
+
+            if parsed.path.startswith("/assets/"):
+                asset_name = parsed.path.removeprefix("/assets/")
+                asset_types = {
+                    "app_icon.png": "image/png",
+                    "app_icon.ico": "image/x-icon",
+                    "chinlung_logo.png": "image/png",
+                    "logo.svg": "image/svg+xml; charset=utf-8",
+                }
+                if asset_name not in asset_types:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+                    return
+                self._send_asset(ASSETS_DIR / asset_name, asset_types[asset_name])
+                return
+
             if parsed.path in ("/", "/index.html"):
                 body = HTML_PAGE.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
@@ -1186,6 +1283,35 @@ def make_handler(store: ScoreboardStore):
                 self._send_json(HTTPStatus.OK, store.build_leaderboard(pin_key=pin_key))
                 return
 
+            if parsed.path == "/api/backups":
+                self._send_json(HTTPStatus.OK, {"backups": store.list_backups()})
+                return
+
+            if parsed.path == "/api/backup/download":
+                query = urllib.parse.parse_qs(parsed.query)
+                requested = query.get("file", [""])[0]
+                is_backup_name = (
+                    requested.startswith("scoreboard.backup.")
+                    and requested.endswith(".json")
+                    and "/" not in requested
+                    and "\\" not in requested
+                )
+                available = {item["name"] for item in store.list_backups()}
+                filename = requested if is_backup_name and requested in available else "scoreboard.json"
+                path = store.data_dir / filename
+                try:
+                    payload = path.read_bytes()
+                except OSError:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Backup not found"})
+                    return
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+
             if parsed.path == "/api/warnings":
                 qs = urllib.parse.parse_qs(parsed.query)
                 agent = qs.get("agent", [None])[0]
@@ -1193,6 +1319,18 @@ def make_handler(store: ScoreboardStore):
                 return
 
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+
+        def _send_asset(self, path: Path, content_type: str) -> None:
+            try:
+                payload = path.read_bytes()
+            except OSError:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "Asset not found"})
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
         def do_POST(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
@@ -1278,6 +1416,19 @@ def make_handler(store: ScoreboardStore):
     return Handler
 
 
+def _open_app_window(url: str) -> None:
+    """Open the scoreboard in a Chromium app window when a browser is available."""
+    for executable in ("msedge.exe", "chrome.exe"):
+        browser_path = shutil.which(executable)
+        if browser_path:
+            try:
+                subprocess.Popen([browser_path, f"--app={url}"])
+                return
+            except OSError:
+                continue
+    webbrowser.open(url)
+
+
 def run_server(store: ScoreboardStore, host: str = "127.0.0.1", port: int = DEFAULT_PORT, open_browser: bool = False) -> None:
     handler = make_handler(store)
     server = None
@@ -1295,7 +1446,7 @@ def run_server(store: ScoreboardStore, host: str = "127.0.0.1", port: int = DEFA
                             url = f"http://{host}:{port}"
                             print(f"Agent Scoreboard already running at {url}", flush=True)
                             if open_browser:
-                                webbrowser.open(url)
+                                _open_app_window(url)
                             return
                 except Exception:
                     pass
@@ -1306,7 +1457,7 @@ def run_server(store: ScoreboardStore, host: str = "127.0.0.1", port: int = DEFA
     url = f"http://{host}:{actual_port}"
     print(f"Agent Scoreboard running at {url} (data: {store.data_dir})", flush=True)
     if open_browser:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.4, lambda: _open_app_window(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

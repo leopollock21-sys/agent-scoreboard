@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -142,6 +143,10 @@ class TestHttpAndMcp(unittest.TestCase):
         self.tmp.cleanup()
 
     def _req(self, path: str, method: str = "GET", body: dict | None = None, pin: str = "", headers: dict | None = None) -> tuple[int, str]:
+        status, _, payload = self._req_bytes(path, method, body, pin, headers)
+        return status, payload.decode("utf-8", errors="replace")
+
+    def _req_bytes(self, path: str, method: str = "GET", body: dict | None = None, pin: str = "", headers: dict | None = None) -> tuple[int, dict[str, str], bytes]:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req_headers = {"Content-Type": "application/json"} if data is not None else {}
         if headers:
@@ -153,9 +158,42 @@ class TestHttpAndMcp(unittest.TestCase):
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
-                return resp.status, resp.read().decode("utf-8")
+                return resp.status, dict(resp.headers), resp.read()
         except urllib.error.HTTPError as err:
-            return err.code, err.read().decode("utf-8")
+            return err.code, dict(err.headers), err.read()
+
+    def test_http_brand_assets(self) -> None:
+        for path in ("/assets/app_icon.png", "/assets/chinlung_logo.png"):
+            with self.subTest(path=path):
+                status, headers, payload = self._req_bytes(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("Content-Type"), "image/png")
+                self.assertTrue(payload)
+
+    def test_http_backup_listing(self) -> None:
+        created = self.store.reset_pin_and_archive()
+        status, body = self._req("/api/backups")
+        self.assertEqual(status, 200)
+        backups = json.loads(body)["backups"]
+        self.assertEqual([item["name"] for item in backups], [created.name])
+        self.assertEqual(backups[0]["size"], created.stat().st_size)
+        self.assertRegex(backups[0]["modified_utc"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_http_backup_download_and_path_traversal_rejection(self) -> None:
+        created = self.store.reset_pin_and_archive()
+        status, headers, payload = self._req_bytes(
+            "/api/backup/download?file=" + urllib.parse.quote(created.name)
+        )
+        self.assertEqual(status, 200)
+        self.assertIn(f'filename="{created.name}"', headers.get("Content-Disposition", ""))
+        self.assertEqual(payload, created.read_bytes())
+
+        status, headers, payload = self._req_bytes(
+            "/api/backup/download?file=..%2F..%2Fscoreboard.json"
+        )
+        self.assertEqual(status, 200)
+        self.assertIn('filename="scoreboard.json"', headers.get("Content-Disposition", ""))
+        self.assertEqual(payload, self.store.scoreboard_path.read_bytes())
 
     def test_http_ui_and_pending_approval_flow(self) -> None:
         status, html = self._req("/")
