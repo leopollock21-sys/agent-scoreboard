@@ -394,6 +394,26 @@ class ScoreboardStore:
             })
         return items
 
+    def delete_backup(self, filename: str) -> None:
+        filename = (filename or "").strip()
+        valid = (
+            (filename.startswith("scoreboard.backup.") or filename.startswith("scoreboard.auto.") or filename.startswith("scoreboard.manual."))
+            and filename.endswith(".json")
+            and "/" not in filename
+            and "\\" not in filename
+            and ".." not in filename
+        )
+        if not valid:
+            raise ValueError("Invalid backup file name.")
+        deleted = False
+        for folder in (self.get_backup_dir(), self.data_dir):
+            target = folder / filename
+            if target.is_file():
+                target.unlink()
+                deleted = True
+        if not deleted:
+            raise KeyError(f"Backup '{filename}' not found.")
+
     def reset_pin_and_archive(self) -> Path:
         """Archive current scoreboard.json and clear PIN/ledger while keeping agents & categories."""
         with self._lock:
@@ -690,7 +710,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   :root { color-scheme: dark; --bg:#090a0d; --card:rgba(22,24,30,.86); --line:rgba(255,255,255,.09); --text:#f5f5f7; --muted:#989aa4; --accent:#0a84ff; --green:#30d158; --red:#ff453a; --amber:#ffd60a; }
   * { box-sizing:border-box; }
   body { margin:0; background:radial-gradient(900px 420px at 50% -120px, rgba(10,132,255,.14), transparent 70%), var(--bg); color:var(--text); font:14.5px/1.55 "Inter",-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI Variable","Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; font-feature-settings:"cv02","cv03","cv04","cv11"; }
-  .wrap { max-width:1120px; margin:0 auto; padding:32px 24px 28px; }
+  .wrap { max-width:1440px; width:100%; margin:0 auto; padding:22px 24px 24px; }
   header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:18px; margin-bottom:24px; }
   .brand { display:flex; align-items:center; gap:14px; min-width:240px; }
   .app-icon { width:44px; height:44px; border-radius:12px; object-fit:cover; box-shadow:0 6px 20px rgba(0,0,0,.35); }
@@ -709,7 +729,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.good { background:rgba(48,209,88,.12); border-color:rgba(48,209,88,.38); color:#78e995; }
   button.bad { background:rgba(255,69,58,.12); border-color:rgba(255,69,58,.38); color:#ff938c; }
-  button.mini { min-width:44px; min-height:44px; padding:7px 10px; font-size:13px; border-radius:10px; }
+  button.mini { min-width:30px; min-height:30px; padding:4px 9px; font-size:12.5px; border-radius:8px; }
   .badge { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:12px; font-weight:700; }
   .badge.TRUSTED { background:rgba(48,209,88,.16); color:#78e995; }
   .badge.ACTIVE { background:rgba(10,132,255,.17); color:#7dbbff; }
@@ -719,7 +739,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .segmented button[aria-selected="true"] { background:#2a2b31; color:var(--text); box-shadow:0 1px 4px rgba(0,0,0,.25); }
   .tab-panel[hidden] { display:none; }
   table { width:100%; border-collapse:collapse; }
-  th,td { padding:13px 10px; text-align:left; border-bottom:1px solid var(--line); font-size:14px; font-variant-numeric:tabular-nums; }
+  th,td { padding:10px 8px; text-align:left; border-bottom:1px solid var(--line); font-size:13.5px; font-variant-numeric:tabular-nums; }
   th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; font-weight:600; }
   .cat-cell { white-space:nowrap; font-variant-numeric:tabular-nums; }
   .score-pos { color:#78e995; font-weight:700; }
@@ -860,11 +880,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <section class="tab-panel" id="panel-faq" role="tabpanel" aria-labelledby="tab-faq" hidden>
     <div class="card">
       <h2>Frequently Asked Questions</h2>
-      <div class="faq-item"><h3>How does scoring work?</h3><p>Each approved reward adds one point and each punishment removes one point in one of five categories. Every official entry keeps its reason in the recent history.</p></div>
-      <div class="faq-item"><h3>How does tamper protection work?</h3><p>Entries are linked in a SHA-256 chain and signed with your Owner PIN. The scoreboard checks the chain and reports changes that break its integrity.</p></div>
-      <div class="faq-item"><h3>What is agent_brief.md?</h3><p>It is a plain-text summary of agent standings, warnings, and recent reasons. Agents can read it before a task to understand their current feedback.</p></div>
-      <div class="faq-item"><h3>How do I connect a new AI agent?</h3><p>Add its name and role on the Leaderboard tab, then select Copy Setup Prompt and paste the instructions into that agent’s chat or custom instructions.</p></div>
-      <div class="faq-item"><h3>What happens if I forgot my PIN?</h3><p>Select Forgot PIN? in the header. The current scores are saved as a downloadable backup, your agents are kept, and you can set a new PIN.</p></div>
+      <div class="faq-item"><h3>What is Agent Scoreboard trying to do?</h3><p>AI agents do not feel pride or pain on their own, and letting an AI grade itself leads to fake scores. Agent Scoreboard creates real human-in-the-loop accountability: after every task, you reward (+1) or punish (-1) the agent with a specific reason, and that reason is fed back into the agent's startup context so it does not repeat past mistakes.</p></div>
+      <div class="faq-item"><h3>What is the scoring system based on?</h3><p>It is based on five human-AI partnership pillars—<strong>Affection</strong> (kindness &amp; attitude), <strong>Trust</strong> (truthfulness &amp; verified proof), <strong>Faith</strong> (loyalty &amp; obedience to your rules), <strong>Execution</strong> (clean, finished results), and <strong>Wisdom</strong> (smart, simple root-cause thinking)—backed by a PIN-signed SHA-256 hash chain and a live <code>agent_brief.md</code> feedback loop.</p></div>
+      <div class="faq-item"><h3>How does tamper protection work?</h3><p>Entries are linked in a SHA-256 chain and HMAC-signed with your Owner PIN. If an agent ever edits <code>scoreboard.json</code> directly, a red <strong>TAMPERED</strong> alert appears immediately.</p></div>
+      <div class="faq-item"><h3>How do I connect a new AI agent?</h3><p>Add its name on the Leaderboard tab (comma-separated bulk add is supported), then click <strong>Copy Setup Prompt</strong> and paste it into that agent's chat or custom instructions.</p></div>
+      <div class="faq-item"><h3>What happens if I forget my PIN?</h3><p>Click <strong>Forgot PIN?</strong> in the header and choose <strong>Start Fresh</strong>. Your old scores are archived as a backup, your agents stay on the board, and you can set a new PIN right away.</p></div>
+      <div class="faq-item"><h3>How can I contact Chinlung Technologies?</h3><p>Email us anytime at <a href="mailto:chinlungtech@gmail.com" style="color:#7dbbff;">chinlungtech@gmail.com</a>.</p></div>
     </div>
   </section>
 
@@ -873,8 +894,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <h2>About Us</h2>
       <div class="about-brand">
         <img class="company-logo" src="/assets/chinlung_logo.png" alt="Chinlung Technologies company logo">
-        <div class="about-meta"><strong style="color:var(--text);font-size:18px;">Chinlung Technologies</strong><span>Agent Scoreboard v1.1.0</span><span>MIT License</span><a href="https://github.com/leopollock21-sys/agent-scoreboard" target="_blank" rel="noopener noreferrer">View on GitHub</a></div>
+        <div class="about-meta">
+          <strong style="color:var(--text);font-size:18px;">Chinlung Technologies</strong>
+          <span>Agent Scoreboard v1.1.0 • MIT Open Source</span>
+          <span>Contact: <a href="mailto:chinlungtech@gmail.com">chinlungtech@gmail.com</a></span>
+          <a href="https://github.com/leopollock21-sys/agent-scoreboard" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+        </div>
       </div>
+      <p style="margin:16px 0 8px; color:var(--text);"><strong>Our Mission:</strong> Keep every AI assistant honest, accountable, and aligned with real human judgment.</p>
+      <p class="muted" style="margin:0;">Agent Scoreboard is built on five human-AI trust pillars (Affection, Trust, Faith, Execution, and Wisdom) combined with a PIN-signed tamper-evident ledger and an automatic startup feedback brief (<code>agent_brief.md</code>) so every agent sees its rank, warnings, and specific past reward/punishment reasons before starting work.</p>
     </div>
   </section>
 
@@ -909,10 +937,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 </dialog>
 
+<dialog id="deleteBackupModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:420px; width:92%;">
+  <h2 id="deleteBackupTitle" style="margin:0 0 10px; font-size:16px;">Delete Backup?</h2>
+  <p class="muted" style="margin:0 0 14px;">Permanently delete this saved backup file from disk?</p>
+  <div class="row" style="justify-content:flex-end;">
+    <button data-action="closeDeleteBackupModal">Cancel</button>
+    <button class="bad" data-action="confirmDeleteBackup">Delete</button>
+  </div>
+</dialog>
+
 <script>
 let STATE = null;
 let QUICK_CTX = null;
 let REMOVE_TARGET = null;
+let DELETE_BACKUP_TARGET = null;
 
 document.addEventListener('click', (e) => {
   const tab = e.target.closest('[data-tab]');
@@ -931,6 +969,9 @@ document.addEventListener('click', (e) => {
   else if (action === 'backupNow') backupNow();
   else if (action === 'pickBackupFolder') pickBackupFolder();
   else if (action === 'saveBackupFolder') saveBackupFolder();
+  else if (action === 'deleteBackup') openDeleteBackupModal(target.dataset.file);
+  else if (action === 'closeDeleteBackupModal') closeDeleteBackupModal();
+  else if (action === 'confirmDeleteBackup') confirmDeleteBackup();
   else if (action === 'submitDirectScore') submitDirectScore(parseInt(target.dataset.delta));
   else if (action === 'addAgent') addAgent();
   else if (action === 'copyAgentInstructions') copyAgentInstructions();
@@ -971,7 +1012,10 @@ async function loadBackups() {
     list.innerHTML = data.backups.map(item => `
       <div class="backup-item">
         <div><strong>${escapeHtml(item.name)}</strong><div class="muted">${escapeHtml(item.modified_utc)} · ${(item.size / 1024).toFixed(1)} KB</div></div>
-        <a class="button mini" href="/api/backup/download?file=${encodeURIComponent(item.name)}">Download</a>
+        <div class="row">
+          <a class="button mini" href="/api/backup/download?file=${encodeURIComponent(item.name)}">Download</a>
+          <button class="mini bad" data-action="deleteBackup" data-file="${escapeHtml(item.name)}">Delete</button>
+        </div>
       </div>`).join('');
   } catch (err) {
     list.className = 'empty';
@@ -1338,6 +1382,32 @@ async function pickBackupFolder() {
   } catch (err) { showError(err.message); }
 }
 
+function openDeleteBackupModal(file) {
+  DELETE_BACKUP_TARGET = file;
+  document.getElementById("deleteBackupTitle").textContent = `Delete "${file}"?`;
+  const dlg = document.getElementById("deleteBackupModal");
+  if (dlg.showModal) dlg.showModal();
+  else dlg.setAttribute("open", "");
+}
+
+function closeDeleteBackupModal() {
+  DELETE_BACKUP_TARGET = null;
+  const dlg = document.getElementById("deleteBackupModal");
+  if (dlg.close) dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+async function confirmDeleteBackup() {
+  if (!DELETE_BACKUP_TARGET) return;
+  const file = DELETE_BACKUP_TARGET;
+  closeDeleteBackupModal();
+  try {
+    await api("/api/backup/delete", { method: "POST", body: JSON.stringify({ file }) });
+    document.getElementById("backupFolderNote").textContent = "Deleted backup: " + file;
+    await loadBackups();
+  } catch (err) { showError(err.message); }
+}
+
 loadState();
 </script>
 """
@@ -1501,6 +1571,11 @@ def make_handler(store: ScoreboardStore):
                     self._send_json(HTTPStatus.OK, {"ok": True, "file": backup.name})
                     return
 
+                if parsed.path == "/api/backup/delete":
+                    store.delete_backup(str(body.get("file", "")))
+                    self._send_json(HTTPStatus.OK, {"ok": True})
+                    return
+
                 if parsed.path == "/api/backup/folder":
                     bdir = store.set_backup_dir(str(body.get("folder", "")))
                     self._send_json(HTTPStatus.OK, {"ok": True, "backup_dir": str(bdir)})
@@ -1607,7 +1682,7 @@ def run_app(store: ScoreboardStore, host: str = "127.0.0.1", port: int = DEFAULT
     t.start()
     try:
         import webview
-        webview.create_window("Agent Scoreboard — Chinlung Technologies", url, width=1160, height=820, min_size=(820, 620))
+        webview.create_window("Agent Scoreboard — Chinlung Technologies", url, width=1280, height=840, min_size=(960, 620))
         webview.start()
     except Exception:
         _open_app_window(url)

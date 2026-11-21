@@ -191,6 +191,15 @@ class TestHttpAndMcp(unittest.TestCase):
             fname = json.loads(body2)["file"]
             self.assertTrue((Path(custom_dir) / fname).is_file())
 
+            # Reject deleting scoreboard.json
+            status, _ = self._req("/api/backup/delete", "POST", {"file": "scoreboard.json"})
+            self.assertEqual(status, 400)
+
+            # Delete valid backup file from UI endpoint
+            status, _ = self._req("/api/backup/delete", "POST", {"file": fname})
+            self.assertEqual(status, 200)
+            self.assertFalse((Path(custom_dir) / fname).is_file())
+
     def test_http_backup_download_and_path_traversal_rejection(self) -> None:
         created = self.store.reset_pin_and_archive()
         status, headers, payload = self._req_bytes(

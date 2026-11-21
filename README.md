@@ -1,13 +1,20 @@
 # Agent Scoreboard
 
-A simple, zero-dependency, tamper-evident **scoring, reward, and punishment leaderboard** for all your AI agents (**Antigravity, Claude Code / Claude Desktop, OpenAI Codex CLI, and ChatGPT**).
+A simple, zero-dependency, tamper-evident **scoring, reward, and punishment leaderboard** for all your AI agents (**Antigravity, Claude Code / Claude Desktop, OpenAI Codex CLI, and ChatGPT**), built by **Chinlung Technologies**.
 
-## Scoring Categories (`+1` Reward / `-1` Punishment)
-1. **Affection** — Kindness & attitude
-2. **Trust** — Truthfulness & honesty
-3. **Faith** — Faithfulness & obedience to your rules
-4. **Execution** — Clean, finished results
-5. **Wisdom** — Smart thinking & creativity
+## What Agent Scoreboard Is Trying to Do
+AI agents do not feel pride or pain on their own, and letting an AI grade itself produces fake status reports. **Agent Scoreboard** turns real human judgment into a closed-loop memory system:
+1. After a task, you reward (`+1`) or punish (`-1`) the agent with a **specific reason** (for example: *"+1 Trust — showed real test logs"* or *"-1 Faith — skipped git commit rule"*).
+2. Every official score is locked with your private PIN so no agent can alter its own standing.
+3. Every approved score automatically updates `~/.agent-scoreboard/agent_brief.md` with each agent's rank, active warnings, and recent specific reward/punishment reasons—which agents read at the start of their next task so they stop repeating past mistakes.
+
+## What the Scoring System Is Based On
+The leaderboard is based on five core human-AI partnership pillars (`+1` Reward / `-1` Punishment):
+1. **Affection** — Kindness, tone, and helpful attitude
+2. **Trust** — Truthfulness, honesty, and verified proof (never guessing or bluffing)
+3. **Faith** — Faithfulness and strict obedience to your rules and goals
+4. **Execution** — Clean, finished results without breaking working code
+5. **Wisdom** — Smart, creative, simple root-cause problem solving
 
 ## Why Agents Cannot Cheat
 - **Owner PIN:** You set a private PIN in the Leaderboard UI. Only a salted PBKDF2 hash is stored; your PIN is never saved in plain text.
@@ -52,7 +59,10 @@ python -m unittest test_scoreboard.py -v
 ```
 
 ## Forgot Your PIN?
-Because scores are signed with your PIN, a forgotten PIN cannot be recovered. Click **Forgot PIN?** next to the Unlock button in the Leaderboard UI and confirm **Start Fresh**—this saves a backup of your old scores, keeps all your agents, and lets you set a new PIN with zero commands.
+Because scores are signed with your PIN, a forgotten PIN cannot be recovered. Click **Forgot PIN?** next to the Unlock button in the Leaderboard UI and confirm **Start Fresh**—this saves a backup of your old scores, keeps all your agents, and lets you set a new PIN with zero commands. You can also manage, download, or delete old backup files directly from the **Backup** tab.
+
+## Contact
+**Chinlung Technologies** — [chinlungtech@gmail.com](mailto:chinlungtech@gmail.com)
 
 ## License
 [MIT](LICENSE)
