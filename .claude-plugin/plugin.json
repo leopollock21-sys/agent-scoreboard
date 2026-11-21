@@ -1,0 +1,12 @@
+{
+  "name": "agent-scoreboard",
+  "version": "1.0.0",
+  "description": "Tamper-evident scoring, reward, and punishment leaderboard for AI agents across Affection, Trust, Faith, Execution, and Wisdom.",
+  "skills": ["./skills/agent-scoreboard"],
+  "mcpServers": {
+    "agent_scoreboard": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_server.py"]
+    }
+  }
+}

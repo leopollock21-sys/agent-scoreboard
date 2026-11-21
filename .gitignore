@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+scoreboard.json
+pending.json
+agent_brief.md
+*.tmp

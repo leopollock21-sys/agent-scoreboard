@@ -1,0 +1,67 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent Scoreboard API",
+    "version": "1.0.0",
+    "description": "Read-only leaderboard & warnings + safe pending score proposal API for ChatGPT Custom GPT Actions (connect via an HTTPS tunnel such as Cloudflare Tunnel)."
+  },
+  "servers": [
+    {
+      "url": "https://YOUR-TUNNEL-URL.trycloudflare.com",
+      "description": "Replace with your public HTTPS tunnel URL pointing to http://127.0.0.1:8787"
+    }
+  ],
+  "paths": {
+    "/api/warnings": {
+      "get": {
+        "operationId": "getAgentWarnings",
+        "summary": "Get leaderboard standing, warnings, and specific past reward/punishment reasons",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current agent standing and recent reasons"
+          }
+        }
+      }
+    },
+    "/api/propose": {
+      "post": {
+        "operationId": "proposeScore",
+        "summary": "Submit a user-requested score into the Pending Approvals queue (requires human PIN approval in UI)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["agent", "category", "delta", "reason"],
+                "properties": {
+                  "agent": { "type": "string" },
+                  "category": {
+                    "type": "string",
+                    "enum": ["Affection", "Trust", "Faith", "Execution", "Wisdom"]
+                  },
+                  "delta": { "type": "integer", "enum": [-1, 1] },
+                  "reason": { "type": "string" },
+                  "proposed_by": { "type": "string", "default": "ChatGPT" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Score queued for human approval"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "agent-scoreboard",
+  "displayName": "Agent Scoreboard",
+  "version": "1.0.0",
+  "author": "leopollock21",
+  "repository": "https://github.com/leopollock21-sys/agent-scoreboard",
+  "description": "Tamper-evident scoring, reward, and punishment leaderboard for AI agents across Affection, Trust, Faith, Execution, and Wisdom.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Show the current Agent Scoreboard leaderboard and warnings",
+    "Check my recent reward and punishment reasons before starting",
+    "Propose +1 Trust for Claude for verifying tests before finishing"
+  ]
+}
