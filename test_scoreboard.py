@@ -277,6 +277,25 @@ class TestHttpAndMcp(unittest.TestCase):
             self.assertTrue(lock_file.exists())
         self.assertFalse(lock_file.exists())
 
+    def test_remove_agent_preserves_integrity(self) -> None:
+        self.store.set_pin("7777")
+        self.store.add_agent("Research Subagent", "Read-only explorer", "7777")
+        self.store.record_score(
+            agent="Research Subagent",
+            category="Execution",
+            delta=1,
+            reason="Found exact root cause",
+            pin="7777",
+        )
+        self.store.remove_agent("Research Subagent", "7777")
+        key = self.store.verify_pin("7777")
+        board = self.store.build_leaderboard(pin_key=key)
+        self.assertTrue(board["integrity"]["ok"])
+        self.assertTrue(board["integrity"]["verified_signatures"])
+        names = [r["agent"] for r in board["leaderboard"]]
+        self.assertNotIn("Research Subagent", names)
+        self.assertNotIn("Research Subagent", self.store.brief_path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

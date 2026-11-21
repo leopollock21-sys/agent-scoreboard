@@ -290,6 +290,20 @@ class ScoreboardStore:
                 self.regenerate_brief()
                 return data["agents"][name]
 
+    def remove_agent(self, name: str, pin: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("Agent name cannot be empty.")
+        with self._lock:
+            with FileLock(self.scoreboard_path):
+                self.verify_pin(pin)
+                data = self.load_scoreboard()
+                if name not in data["agents"]:
+                    raise KeyError(f"Agent '{name}' not found.")
+                del data["agents"][name]
+                self._write_json(self.scoreboard_path, data)
+                self.regenerate_brief()
+
     def record_score(
         self,
         *,
@@ -443,16 +457,7 @@ class ScoreboardStore:
                 cat = entry["category"]
                 delta = int(entry["delta"])
                 if name not in rows_map:
-                    rows_map[name] = {
-                        "agent": name,
-                        "description": "",
-                        "scores": {c: 0 for c in categories},
-                        "total": 0,
-                        "events_count": 0,
-                        "recent_reasons": [],
-                        "warnings": [],
-                        "status": "ACTIVE",
-                    }
+                    continue
                 row = rows_map[name]
                 if cat in row["scores"]:
                     row["scores"][cat] += delta
@@ -710,12 +715,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="card">
       <h2>Add Agent</h2>
       <div class="row" style="margin-bottom:10px;">
-        <input type="text" id="addAgentName" placeholder="Agent name (e.g. Gemini Pro)" style="flex:1;">
+        <input type="text" id="addAgentName" placeholder="Agent or subagent name (e.g. Walkthrough Verifier)" style="flex:1;">
       </div>
       <div class="row" style="margin-bottom:10px;">
         <input type="text" id="addAgentDesc" placeholder="Short role description" style="flex:1;">
       </div>
-      <button class="primary" data-action="addAgent">Add to Leaderboard</button>
+      <div class="row" style="justify-content:space-between;">
+        <button class="primary" data-action="addAgent">Add to Leaderboard</button>
+        <span class="muted" id="agentSyncNote">New agents see their standing via agent_brief.md or MCP.</span>
+      </div>
     </div>
   </div>
 
@@ -724,6 +732,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div id="historyList" class="empty">No scores recorded yet.</div>
   </div>
 </div>
+
+<dialog id="removeModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:420px; width:92%;">
+  <h2 id="removeModalTitle" style="margin:0 0 10px; font-size:16px;">Remove Agent</h2>
+  <p class="muted" style="margin:0 0 14px;">Remove this agent from the active leaderboard? Past history stays signed in the ledger.</p>
+  <div class="row" style="justify-content:flex-end;">
+    <button data-action="closeRemoveModal">Cancel</button>
+    <button class="bad" data-action="confirmRemoveAgent">Remove</button>
+  </div>
+</dialog>
 
 <dialog id="quickModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:440px; width:92%;">
   <h2 id="quickModalTitle" style="margin:0 0 10px; font-size:16px;">Add Reason</h2>
@@ -738,6 +755,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <script>
 let STATE = null;
 let QUICK_CTX = null;
+let REMOVE_TARGET = null;
 
 document.addEventListener('click', (e) => {
   const target = e.target.closest('[data-action]');
@@ -750,6 +768,9 @@ document.addEventListener('click', (e) => {
   else if (action === 'lockUi') lockUi();
   else if (action === 'submitDirectScore') submitDirectScore(parseInt(target.dataset.delta));
   else if (action === 'addAgent') addAgent();
+  else if (action === 'removeAgent') openRemoveModal(target.dataset.agent);
+  else if (action === 'closeRemoveModal') closeRemoveModal();
+  else if (action === 'confirmRemoveAgent') confirmRemoveAgent();
   else if (action === 'quickScore') quickScore(target.dataset.agent, target.dataset.category, parseInt(target.dataset.delta));
   else if (action === 'closeQuickModal') closeQuickModal();
   else if (action === 'confirmQuickScore') confirmQuickScore();
@@ -906,7 +927,7 @@ async function resolvePending(id, actionType) {
 }
 
 async function addAgent() {
-  if (!getPin()) { showError("Unlock with your Owner PIN first."); return; }
+  if (!requireUnlockedPin()) return;
   const name = document.getElementById("addAgentName").value.trim();
   const description = document.getElementById("addAgentDesc").value.trim();
   if (!name) { showError("Enter an agent name."); return; }
@@ -914,6 +935,33 @@ async function addAgent() {
     await api("/api/agents", { method: "POST", body: JSON.stringify({ name, description }) });
     document.getElementById("addAgentName").value = "";
     document.getElementById("addAgentDesc").value = "";
+    document.getElementById("agentSyncNote").textContent = `Added "${name}" to agent_brief.md & MCP.`;
+    await loadState();
+  } catch (err) { showError(err.message); }
+}
+
+function openRemoveModal(agent) {
+  if (!requireUnlockedPin()) return;
+  REMOVE_TARGET = agent;
+  document.getElementById("removeModalTitle").textContent = `Remove "${agent}"?`;
+  const dlg = document.getElementById("removeModal");
+  if (dlg.showModal) dlg.showModal();
+  else dlg.setAttribute("open", "");
+}
+
+function closeRemoveModal() {
+  REMOVE_TARGET = null;
+  const dlg = document.getElementById("removeModal");
+  if (dlg.close) dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+async function confirmRemoveAgent() {
+  if (!REMOVE_TARGET) return;
+  const name = REMOVE_TARGET;
+  closeRemoveModal();
+  try {
+    await api("/api/agents/remove", { method: "POST", body: JSON.stringify({ name }) });
     await loadState();
   } catch (err) { showError(err.message); }
 }
@@ -965,7 +1013,7 @@ function render() {
   document.getElementById("boardHead").innerHTML = `<tr>
     <th>Rank</th><th>Agent</th><th>Total</th>
     ${cats.map(c => `<th>${escapeHtml(c)}</th>`).join("")}
-    <th>Status</th>
+    <th>Status</th><th></th>
   </tr>`;
 
   document.getElementById("boardBody").innerHTML = STATE.leaderboard.map(r => `
@@ -984,6 +1032,7 @@ function render() {
         </td>
       `).join("")}
       <td><span class="badge ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
+      <td><button class="mini bad" title="Remove ${escapeHtml(r.agent)}" data-action="removeAgent" data-agent="${escapeHtml(r.agent)}">Remove</button></td>
     </tr>
   `).join("");
 
@@ -1104,6 +1153,11 @@ def make_handler(store: ScoreboardStore):
                         pin,
                     )
                     self._send_json(HTTPStatus.OK, {"ok": True, "agent": agent})
+                    return
+
+                if parsed.path == "/api/agents/remove":
+                    store.remove_agent(str(body.get("name", "")), pin)
+                    self._send_json(HTTPStatus.OK, {"ok": True})
                     return
 
                 if parsed.path == "/api/score":
