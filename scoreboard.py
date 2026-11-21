@@ -758,6 +758,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 </dialog>
 
+<dialog id="resetPinModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:440px; width:92%;">
+  <h2 style="margin:0 0 10px; font-size:16px;">Forgot Your PIN?</h2>
+  <p class="muted" style="margin:0 0 14px;">This saves a backup of your old scores, keeps all your agents, and lets you set a new PIN. Current scores will reset to 0.</p>
+  <div class="row" style="justify-content:flex-end;">
+    <button data-action="closeResetPinModal">Cancel</button>
+    <button class="bad" data-action="confirmResetPin">Start Fresh</button>
+  </div>
+</dialog>
+
 <dialog id="quickModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:440px; width:92%;">
   <h2 id="quickModalTitle" style="margin:0 0 10px; font-size:16px;">Add Reason</h2>
   <p class="muted" style="margin:0 0 12px;">Enter a short reason so the agent sees why it received this score.</p>
@@ -782,6 +791,9 @@ document.addEventListener('click', (e) => {
   else if (action === 'refresh') loadState();
   else if (action === 'unlockUi') unlockUi();
   else if (action === 'lockUi') lockUi();
+  else if (action === 'openResetPinModal') openResetPinModal();
+  else if (action === 'closeResetPinModal') closeResetPinModal();
+  else if (action === 'confirmResetPin') confirmResetPin();
   else if (action === 'submitDirectScore') submitDirectScore(parseInt(target.dataset.delta));
   else if (action === 'addAgent') addAgent();
   else if (action === 'copyAgentInstructions') copyAgentInstructions();
@@ -844,6 +856,7 @@ function renderPinControls() {
     box.innerHTML = `
       <input type="password" id="unlockPinInput" placeholder="Owner PIN" style="width:140px;">
       <button class="primary" data-action="unlockUi">Unlock</button>
+      <button data-action="openResetPinModal">Forgot PIN?</button>
     `;
   }
 }
@@ -867,6 +880,27 @@ async function unlockUi() {
 }
 
 function lockUi() { setSessionPin(""); loadState(); }
+
+function openResetPinModal() {
+  const dlg = document.getElementById("resetPinModal");
+  if (dlg.showModal) dlg.showModal();
+  else dlg.setAttribute("open", "");
+}
+
+function closeResetPinModal() {
+  const dlg = document.getElementById("resetPinModal");
+  if (dlg.close) dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+async function confirmResetPin() {
+  closeResetPinModal();
+  try {
+    await api("/api/pin/reset", { method: "POST", body: "{}" });
+    setSessionPin("");
+    await loadState();
+  } catch (err) { showError(err.message); }
+}
 
 function requireUnlockedPin() {
   if (STATE && !STATE.has_pin) {
@@ -1182,6 +1216,11 @@ def make_handler(store: ScoreboardStore):
                 if parsed.path == "/api/pin/verify":
                     store.verify_pin(pin)
                     self._send_json(HTTPStatus.OK, {"ok": True})
+                    return
+
+                if parsed.path == "/api/pin/reset":
+                    backup = store.reset_pin_and_archive()
+                    self._send_json(HTTPStatus.OK, {"ok": True, "backup": str(backup)})
                     return
 
                 if parsed.path == "/api/agents":

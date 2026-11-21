@@ -307,6 +307,15 @@ class TestHttpAndMcp(unittest.TestCase):
         self.assertTrue(board["integrity"]["ok"])
         self.assertIn("MyAgent", [r["agent"] for r in board["leaderboard"]])
 
+    def test_http_reset_pin_button_endpoint(self) -> None:
+        status, _ = self._req("/api/pin/setup", "POST", {"pin": "2222"})
+        self.assertEqual(status, 200)
+        status, _ = self._req("/api/pin/reset", "POST", {})
+        self.assertEqual(status, 200)
+        status, state_text = self._req("/api/state")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(state_text)["has_pin"])
+
 
 if __name__ == "__main__":
     unittest.main()

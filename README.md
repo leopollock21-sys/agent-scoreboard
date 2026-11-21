@@ -52,11 +52,7 @@ python -m unittest test_scoreboard.py -v
 ```
 
 ## Forgot Your PIN?
-Because scores are HMAC-signed with your PIN, a forgotten PIN cannot be recovered. Run:
-```bash
-python scoreboard.py reset-pin
-```
-This archives your old `scoreboard.json` to a timestamped backup, keeps your agents and categories, and lets you set a new PIN in the UI.
+Because scores are signed with your PIN, a forgotten PIN cannot be recovered. Click **Forgot PIN?** next to the Unlock button in the Leaderboard UI and confirm **Start Fresh**—this saves a backup of your old scores, keeps all your agents, and lets you set a new PIN with zero commands.
 
 ## License
 [MIT](LICENSE)
