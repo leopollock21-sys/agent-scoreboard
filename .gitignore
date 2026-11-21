@@ -6,3 +6,6 @@ scoreboard.json
 pending.json
 agent_brief.md
 *.tmp
+build/
+dist/
+*.spec

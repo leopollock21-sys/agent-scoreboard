@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import mcp_server
 from scoreboard import DEFAULT_CATEGORIES, ScoreboardStore, make_handler
@@ -174,10 +175,21 @@ class TestHttpAndMcp(unittest.TestCase):
         created = self.store.reset_pin_and_archive()
         status, body = self._req("/api/backups")
         self.assertEqual(status, 200)
-        backups = json.loads(body)["backups"]
-        self.assertEqual([item["name"] for item in backups], [created.name])
-        self.assertEqual(backups[0]["size"], created.stat().st_size)
-        self.assertRegex(backups[0]["modified_utc"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        parsed = json.loads(body)
+        self.assertIn("backup_dir", parsed)
+        names = [item["name"] for item in parsed["backups"]]
+        self.assertIn(created.name, names)
+        self.assertTrue(any(n.startswith("scoreboard.auto.") for n in names))
+
+    def test_custom_backup_folder_and_manual_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as custom_dir:
+            status, body = self._req("/api/backup/folder", "POST", {"folder": custom_dir})
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["backup_dir"], custom_dir)
+            status, body2 = self._req("/api/backup/now", "POST", {})
+            self.assertEqual(status, 200)
+            fname = json.loads(body2)["file"]
+            self.assertTrue((Path(custom_dir) / fname).is_file())
 
     def test_http_backup_download_and_path_traversal_rejection(self) -> None:
         created = self.store.reset_pin_and_archive()

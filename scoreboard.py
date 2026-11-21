@@ -38,7 +38,7 @@ DEFAULT_AGENTS = [
 ]
 DEFAULT_PORT = 8787
 PBKDF2_ITERATIONS = 100_000
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+ASSETS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
 
 
 def get_data_dir(override: str | None = None) -> Path:
@@ -178,6 +178,7 @@ class ScoreboardStore:
         self.scoreboard_path = self.data_dir / "scoreboard.json"
         self.pending_path = self.data_dir / "pending.json"
         self.brief_path = self.data_dir / "agent_brief.md"
+        self.settings_path = self.data_dir / "settings.json"
         self._lock = threading.RLock()
         self._failed_pins = []  # Timestamps of failed attempts
         self._ensure_initialized()
@@ -195,6 +196,7 @@ class ScoreboardStore:
             self._write_json(self.pending_path, {"pending": []})
         if not self.brief_path.exists():
             self.regenerate_brief()
+        self.ensure_daily_backup()
 
     def _write_json(self, path: Path, data: dict[str, Any]):
         tmp = path.with_suffix(".json.tmp")
@@ -319,6 +321,79 @@ class ScoreboardStore:
                 self._write_json(self.scoreboard_path, data)
                 self.regenerate_brief()
 
+    def get_backup_dir(self) -> Path:
+        default_dir = self.data_dir / "backups"
+        if self.settings_path.is_file():
+            try:
+                cfg = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                raw = str(cfg.get("backup_dir", "")).strip()
+                if raw:
+                    p = Path(raw).expanduser()
+                    p.mkdir(parents=True, exist_ok=True)
+                    return p
+            except (OSError, ValueError):
+                pass
+        default_dir.mkdir(parents=True, exist_ok=True)
+        return default_dir
+
+    def set_backup_dir(self, folder: str) -> Path:
+        p = Path(folder.strip()).expanduser()
+        if not str(p):
+            raise ValueError("Backup folder path cannot be empty.")
+        p.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            cfg = {}
+            if self.settings_path.is_file():
+                try:
+                    cfg = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    cfg = {}
+            cfg["backup_dir"] = str(p)
+            self._write_json(self.settings_path, cfg)
+        self.ensure_daily_backup()
+        return p
+
+    def ensure_daily_backup(self) -> Path | None:
+        """Automatically save one daily backup if today's file does not exist yet."""
+        if not self.scoreboard_path.is_file():
+            return None
+        bdir = self.get_backup_dir()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        target = bdir / f"scoreboard.auto.{today}.json"
+        if not target.exists():
+            with self._lock:
+                data = self.load_scoreboard()
+                self._write_json(target, data)
+        return target
+
+    def create_manual_backup(self) -> Path:
+        bdir = self.get_backup_dir()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        target = bdir / f"scoreboard.manual.{stamp}.json"
+        with self._lock:
+            data = self.load_scoreboard()
+            self._write_json(target, data)
+        return target
+
+    def list_backups(self) -> list[dict[str, Any]]:
+        seen: dict[str, Path] = {}
+        for folder in (self.get_backup_dir(), self.data_dir):
+            if not folder.is_dir():
+                continue
+            for p in folder.glob("scoreboard.*.json"):
+                if p.name == "scoreboard.json":
+                    continue
+                seen.setdefault(p.name, p)
+        items: list[dict[str, Any]] = []
+        for p in sorted(seen.values(), key=lambda x: x.stat().st_mtime, reverse=True):
+            st = p.stat()
+            items.append({
+                "name": p.name,
+                "size": st.st_size,
+                "modified_utc": datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+        return items
+
     def reset_pin_and_archive(self) -> Path:
         """Archive current scoreboard.json and clear PIN/ledger while keeping agents & categories."""
         with self._lock:
@@ -388,6 +463,7 @@ class ScoreboardStore:
                 ledger.append(entry)
                 self._write_json(self.scoreboard_path, data)
                 self.regenerate_brief()
+                self.ensure_daily_backup()
                 return entry
 
     def propose_score(
@@ -605,19 +681,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Scoreboard</title>
+<title>Agent Scoreboard — Chinlung Technologies</title>
+<link rel="icon" type="image/png" href="/assets/app_icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: dark; --bg:#0c0d10; --card:#14161b; --line:rgba(255,255,255,.08); --text:#f5f5f7; --muted:#9b9da5; --accent:#0a84ff; --green:#30d158; --red:#ff453a; --amber:#ffd60a; }
+  :root { color-scheme: dark; --bg:#090a0d; --card:rgba(22,24,30,.86); --line:rgba(255,255,255,.09); --text:#f5f5f7; --muted:#989aa4; --accent:#0a84ff; --green:#30d158; --red:#ff453a; --amber:#ffd60a; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
-  .wrap { max-width:1160px; margin:0 auto; padding:30px 24px 24px; }
-  header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:18px; margin-bottom:26px; }
+  body { margin:0; background:radial-gradient(900px 420px at 50% -120px, rgba(10,132,255,.14), transparent 70%), var(--bg); color:var(--text); font:14.5px/1.55 "Inter",-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI Variable","Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; font-feature-settings:"cv02","cv03","cv04","cv11"; }
+  .wrap { max-width:1120px; margin:0 auto; padding:32px 24px 28px; }
+  header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:18px; margin-bottom:24px; }
   .brand { display:flex; align-items:center; gap:14px; min-width:240px; }
-  .app-icon { width:40px; height:40px; border-radius:11px; object-fit:cover; }
-  h1 { margin:0; font-size:23px; line-height:1.2; letter-spacing:-.035em; font-weight:650; }
-  .sub { color:var(--muted); font-size:13px; margin-top:5px; overflow-wrap:anywhere; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:24px; margin-bottom:16px; box-shadow:0 12px 36px rgba(0,0,0,.12); }
-  .card h2 { margin:0 0 16px; font-size:17px; letter-spacing:-.015em; }
+  .app-icon { width:44px; height:44px; border-radius:12px; object-fit:cover; box-shadow:0 6px 20px rgba(0,0,0,.35); }
+  h1 { margin:0; font-size:24px; line-height:1.15; letter-spacing:-.03em; font-weight:700; }
+  .sub { color:var(--muted); font-size:13px; margin-top:4px; overflow-wrap:anywhere; }
+  .card { background:var(--card); backdrop-filter:blur(16px); border:1px solid var(--line); border-radius:18px; padding:24px; margin-bottom:16px; box-shadow:0 16px 40px rgba(0,0,0,.22); }
+  .card h2 { margin:0 0 14px; font-size:16px; font-weight:600; letter-spacing:-.015em; }
   .banner { padding:14px 16px; border-radius:12px; margin-bottom:16px; font-weight:600; display:none; }
   .banner.tamper { background:rgba(255,69,58,.12); border:1px solid var(--red); color:#ffb4ad; }
   .banner.error { background:rgba(255,214,10,.1); border:1px solid var(--amber); color:#ffe985; }
@@ -639,9 +719,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .segmented button[aria-selected="true"] { background:#2a2b31; color:var(--text); box-shadow:0 1px 4px rgba(0,0,0,.25); }
   .tab-panel[hidden] { display:none; }
   table { width:100%; border-collapse:collapse; }
-  th,td { padding:13px 10px; text-align:left; border-bottom:1px solid var(--line); font-size:14px; }
-  th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
-  .cat-cell { white-space:nowrap; }
+  th,td { padding:13px 10px; text-align:left; border-bottom:1px solid var(--line); font-size:14px; font-variant-numeric:tabular-nums; }
+  th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; font-weight:600; }
+  .cat-cell { white-space:nowrap; font-variant-numeric:tabular-nums; }
   .score-pos { color:#78e995; font-weight:700; }
   .score-neg { color:#ff938c; font-weight:700; }
   .score-zero,.muted { color:var(--muted); }
@@ -656,14 +736,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .faq-item h3 { margin:0 0 6px; font-size:15px; }
   .faq-item p { margin:0; color:var(--muted); }
   .about-brand { display:flex; align-items:center; gap:24px; flex-wrap:wrap; }
-  .company-logo { width:min(260px,100%); max-height:112px; object-fit:contain; background:#fff; border-radius:12px; padding:14px; }
-  .about-meta { display:grid; gap:9px; color:var(--muted); }
+  .company-logo { width:96px; height:96px; object-fit:contain; filter:drop-shadow(0 6px 18px rgba(0,0,0,.4)); }
+  .about-meta { display:grid; gap:8px; color:var(--muted); }
   .about-meta a { color:#7dbbff; }
   a.button { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:9px 15px; border:1px solid var(--line); border-radius:11px; background:#202229; color:var(--text); font-size:14px; font-weight:600; text-decoration:none; }
   a.button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   a.button.mini { padding:7px 12px; font-size:13px; }
-  footer { display:flex; justify-content:center; align-items:center; gap:9px; padding:24px 8px 4px; color:var(--muted); font-size:12px; }
-  .footer-logo { width:22px; height:22px; object-fit:contain; border-radius:5px; }
+  footer { display:flex; justify-content:center; align-items:center; gap:10px; padding:26px 8px 6px; color:var(--muted); font-size:13px; }
+  .footer-logo { width:32px; height:32px; object-fit:contain; }
   dialog { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:16px; padding:24px; }
   dialog::backdrop { background:rgba(0,0,0,.65); backdrop-filter:blur(4px); }
   @media (max-width:760px) { .wrap{padding:20px 14px;} .grid-2{grid-template-columns:1fr;} .card{padding:19px;} .segmented{width:100%;} .segmented button{padding-inline:14px;} }
@@ -760,12 +840,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <section class="tab-panel" id="panel-backup" role="tabpanel" aria-labelledby="tab-backup" hidden>
     <div class="card">
-      <div class="row" style="justify-content:space-between;">
-        <div><h2 style="margin-bottom:5px;">Backups</h2><div class="muted">Automatic snapshots created when you reset a forgotten PIN.</div></div>
-        <a class="button primary" href="/api/backup/download">Download Current Backup (.json)</a>
+      <div class="row" style="justify-content:space-between; margin-bottom:14px;">
+        <div><h2 style="margin-bottom:5px;">Automatic Daily Backups</h2><div class="muted">One snapshot per day is saved automatically whenever you open or score.</div></div>
+        <div class="row">
+          <button class="primary" data-action="backupNow">Back Up Now</button>
+          <a class="button" href="/api/backup/download">Download Current (.json)</a>
+        </div>
       </div>
+      <div class="row">
+        <input type="text" id="backupFolderInput" placeholder="Backup folder path" style="flex:1; min-width:240px;">
+        <button data-action="pickBackupFolder">Choose Folder</button>
+        <button data-action="saveBackupFolder">Save Path</button>
+      </div>
+      <div class="muted" id="backupFolderNote" style="margin-top:8px;"></div>
     </div>
-    <div class="card"><h2>Automatic Forgot PIN? Backups</h2><div id="backupList" class="empty" aria-live="polite">Loading backups…</div></div>
+    <div class="card"><h2>Saved Backups</h2><div id="backupList" class="empty" aria-live="polite">Loading backups…</div></div>
   </section>
 
   <section class="tab-panel" id="panel-faq" role="tabpanel" aria-labelledby="tab-faq" hidden>
@@ -839,6 +928,9 @@ document.addEventListener('click', (e) => {
   else if (action === 'openResetPinModal') openResetPinModal();
   else if (action === 'closeResetPinModal') closeResetPinModal();
   else if (action === 'confirmResetPin') confirmResetPin();
+  else if (action === 'backupNow') backupNow();
+  else if (action === 'pickBackupFolder') pickBackupFolder();
+  else if (action === 'saveBackupFolder') saveBackupFolder();
   else if (action === 'submitDirectScore') submitDirectScore(parseInt(target.dataset.delta));
   else if (action === 'addAgent') addAgent();
   else if (action === 'copyAgentInstructions') copyAgentInstructions();
@@ -867,8 +959,12 @@ async function loadBackups() {
   list.textContent = 'Loading backups…';
   try {
     const data = await api('/api/backups');
+    const folderInput = document.getElementById('backupFolderInput');
+    const folderNote = document.getElementById('backupFolderNote');
+    if (folderInput && data.backup_dir) folderInput.value = data.backup_dir;
+    if (folderNote && data.backup_dir && !folderNote.textContent) folderNote.textContent = 'Active folder: ' + data.backup_dir;
     if (!data.backups.length) {
-      list.textContent = 'No automatic backups yet. A backup is created whenever you reset a forgotten PIN.';
+      list.textContent = 'No backups saved yet.';
       return;
     }
     list.className = '';
@@ -1212,6 +1308,36 @@ function render() {
   }
 }
 
+async function backupNow() {
+  try {
+    const res = await api("/api/backup/now", { method: "POST", body: "{}" });
+    document.getElementById("backupFolderNote").textContent = "Saved backup: " + res.file;
+    await loadBackups();
+  } catch (err) { showError(err.message); }
+}
+
+async function saveBackupFolder() {
+  const folder = document.getElementById("backupFolderInput").value.trim();
+  if (!folder) { showError("Enter a backup folder path."); return; }
+  try {
+    const res = await api("/api/backup/folder", { method: "POST", body: JSON.stringify({ folder }) });
+    document.getElementById("backupFolderInput").value = res.backup_dir;
+    document.getElementById("backupFolderNote").textContent = "Backup folder saved: " + res.backup_dir;
+    await loadBackups();
+  } catch (err) { showError(err.message); }
+}
+
+async function pickBackupFolder() {
+  try {
+    const res = await api("/api/backup/pick-folder", { method: "POST", body: "{}" });
+    if (res.backup_dir) {
+      document.getElementById("backupFolderInput").value = res.backup_dir;
+      document.getElementById("backupFolderNote").textContent = "Backup folder updated: " + res.backup_dir;
+      await loadBackups();
+    }
+  } catch (err) { showError(err.message); }
+}
+
 loadState();
 </script>
 """
@@ -1284,21 +1410,30 @@ def make_handler(store: ScoreboardStore):
                 return
 
             if parsed.path == "/api/backups":
-                self._send_json(HTTPStatus.OK, {"backups": store.list_backups()})
+                self._send_json(HTTPStatus.OK, {
+                    "backup_dir": str(store.get_backup_dir()),
+                    "backups": store.list_backups(),
+                })
                 return
 
             if parsed.path == "/api/backup/download":
                 query = urllib.parse.parse_qs(parsed.query)
                 requested = query.get("file", [""])[0]
                 is_backup_name = (
-                    requested.startswith("scoreboard.backup.")
+                    (requested.startswith("scoreboard.backup.") or requested.startswith("scoreboard.auto.") or requested.startswith("scoreboard.manual."))
                     and requested.endswith(".json")
                     and "/" not in requested
                     and "\\" not in requested
                 )
                 available = {item["name"] for item in store.list_backups()}
-                filename = requested if is_backup_name and requested in available else "scoreboard.json"
-                path = store.data_dir / filename
+                if is_backup_name and requested in available:
+                    filename = requested
+                    path = store.get_backup_dir() / filename
+                    if not path.is_file():
+                        path = store.data_dir / filename
+                else:
+                    filename = "scoreboard.json"
+                    path = store.scoreboard_path
                 try:
                     payload = path.read_bytes()
                 except OSError:
@@ -1359,6 +1494,31 @@ def make_handler(store: ScoreboardStore):
                 if parsed.path == "/api/pin/reset":
                     backup = store.reset_pin_and_archive()
                     self._send_json(HTTPStatus.OK, {"ok": True, "backup": str(backup)})
+                    return
+
+                if parsed.path == "/api/backup/now":
+                    backup = store.create_manual_backup()
+                    self._send_json(HTTPStatus.OK, {"ok": True, "file": backup.name})
+                    return
+
+                if parsed.path == "/api/backup/folder":
+                    bdir = store.set_backup_dir(str(body.get("folder", "")))
+                    self._send_json(HTTPStatus.OK, {"ok": True, "backup_dir": str(bdir)})
+                    return
+
+                if parsed.path == "/api/backup/pick-folder":
+                    import tkinter as tk
+                    from tkinter import filedialog
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    chosen = filedialog.askdirectory(title="Choose Agent Scoreboard Backup Folder")
+                    root.destroy()
+                    if not chosen:
+                        self._send_json(HTTPStatus.OK, {"ok": True, "backup_dir": None})
+                        return
+                    bdir = store.set_backup_dir(chosen)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "backup_dir": str(bdir)})
                     return
 
                 if parsed.path == "/api/agents":
@@ -1429,6 +1589,37 @@ def _open_app_window(url: str) -> None:
     webbrowser.open(url)
 
 
+def run_app(store: ScoreboardStore, host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
+    """Launch Agent Scoreboard in a native PyWebView desktop window (or Edge/Chrome --app fallback)."""
+    handler = make_handler(store)
+    server = None
+    for candidate in ([port, *range(port + 1, port + 25), 0] if port != 0 else [0]):
+        try:
+            server = ThreadingHTTPServer((host, candidate), handler)
+            break
+        except OSError:
+            pass
+    if server is None:
+        raise RuntimeError(f"Could not bind Agent Scoreboard server on {host}:{port}")
+    actual_port = server.server_address[1]
+    url = f"http://{host}:{actual_port}"
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        import webview
+        webview.create_window("Agent Scoreboard — Chinlung Technologies", url, width=1160, height=820, min_size=(820, 620))
+        webview.start()
+    except Exception:
+        _open_app_window(url)
+        try:
+            t.join()
+        except KeyboardInterrupt:
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def run_server(store: ScoreboardStore, host: str = "127.0.0.1", port: int = DEFAULT_PORT, open_browser: bool = False) -> None:
     handler = make_handler(store)
     server = None
@@ -1486,9 +1677,14 @@ def main(argv: list[str] | None = None) -> int:
     p_prop.add_argument("--by", default="agent")
 
     sub.add_parser("reset-pin", help="Archive scoreboard and reset forgotten PIN (keeps agents & categories)")
+    sub.add_parser("app", help="Launch Agent Scoreboard as a standalone desktop app window")
 
     args = parser.parse_args(argv)
     store = ScoreboardStore(args.data_dir)
+
+    if args.cmd == "app" or (args.cmd is None and getattr(sys, "frozen", False)):
+        run_app(store, host="127.0.0.1", port=DEFAULT_PORT)
+        return 0
 
     if args.cmd in (None, "serve"):
         host = getattr(args, "host", "127.0.0.1")
