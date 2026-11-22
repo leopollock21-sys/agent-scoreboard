@@ -1586,6 +1586,21 @@ def make_handler(store: ScoreboardStore):
                 raise ValueError("Request body must be a JSON object.")
             return body
 
+        def _discard_bounded_request_body(self) -> None:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                self.close_connection = True
+                return
+            if length < 0 or length > MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
+                return
+            if length:
+                try:
+                    self.rfile.read(length)
+                except (OSError, TimeoutError):
+                    self.close_connection = True
+
         def _has_valid_bearer_token(self) -> bool:
             authorization = self.headers.get("Authorization", "").strip()
             scheme, separator, token = authorization.partition(" ")
@@ -1715,14 +1730,17 @@ def make_handler(store: ScoreboardStore):
             tunneled = is_tunneled_request(self)
             # Only the documented agent proposal endpoint can cross a public tunnel.
             if tunneled and parsed.path != "/api/propose":
+                self._discard_bounded_request_body()
                 self.close_connection = True
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Access denied over tunnel"})
                 return
             if tunneled and not self._has_valid_bearer_token():
+                self._discard_bounded_request_body()
                 self.close_connection = True
                 self._send_unauthorized()
                 return
             if tunneled and not store.allow_remote_proposal():
+                self._discard_bounded_request_body()
                 self.close_connection = True
                 self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many remote proposals. Try again in a minute."})
                 return
@@ -1732,6 +1750,7 @@ def make_handler(store: ScoreboardStore):
                 host = self.headers.get("Host", "").strip().lower()
                 expected_origin = f"http://{host}" if host else ""
                 if origin and origin != expected_origin:
+                    self._discard_bounded_request_body()
                     self.close_connection = True
                     self._send_json(HTTPStatus.FORBIDDEN, {"error": "Cross-origin requests are not allowed."})
                     return
@@ -1841,6 +1860,7 @@ def make_handler(store: ScoreboardStore):
                 self.close_connection = True
                 self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(exc)})
             except UnsupportedMediaTypeError as exc:
+                self._discard_bounded_request_body()
                 self._send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": str(exc)})
             except KeyError as exc:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})

@@ -18,4 +18,4 @@
 - [x] Update release notes and version metadata.
 
 ## Change Log
-- 2026-11-22: Completed 1.2.0 public-release hardening and local validation. The GitHub repository remains unchanged; no push was made.
+- 2026-11-22: Completed 1.2.0 public-release hardening and local validation. A follow-up test found and fixed reset-prone early POST rejections; focused HTTP tests passed three consecutive runs. The GitHub repository remains unchanged; no push was made.
