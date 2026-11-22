@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agent Scoreboard API",
-    "version": "1.0.0",
-    "description": "Read-only leaderboard & warnings + safe pending score proposal API for ChatGPT Custom GPT Actions (connect via an HTTPS tunnel such as Cloudflare Tunnel)."
+    "version": "1.2.0",
+    "description": "Read-only warnings and safe pending score proposals for ChatGPT Custom GPT Actions. Public tunnel access requires an owner-generated bearer token."
   },
   "servers": [
     {
@@ -11,6 +11,16 @@
       "description": "Replace with your public HTTPS tunnel URL pointing to http://127.0.0.1:8787"
     }
   ],
+  "components": {
+    "securitySchemes": {
+      "ScoreboardBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "API token"
+      }
+    }
+  },
+  "security": [{ "ScoreboardBearer": [] }],
   "paths": {
     "/api/warnings": {
       "get": {
@@ -27,6 +37,9 @@
         "responses": {
           "200": {
             "description": "Current agent standing and recent reasons"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
           }
         }
       }
@@ -59,6 +72,15 @@
         "responses": {
           "200": {
             "description": "Score queued for human approval"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
+          },
+          "413": {
+            "description": "Request exceeds the maximum body size"
+          },
+          "429": {
+            "description": "Remote proposal rate limit or pending queue limit reached"
           }
         }
       }

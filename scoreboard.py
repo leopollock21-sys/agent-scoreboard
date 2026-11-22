@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import errno
 import os
@@ -22,6 +23,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
+from collections import deque
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,7 +40,21 @@ DEFAULT_AGENTS = [
 ]
 DEFAULT_PORT = 8787
 PBKDF2_ITERATIONS = 100_000
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+MAX_PENDING_PROPOSALS = 200
+MAX_AGENT_NAME_LENGTH = 100
+MAX_PROPOSAL_REASON_LENGTH = 2000
+MAX_PROPOSED_BY_LENGTH = 100
+REMOTE_PROPOSALS_PER_MINUTE = 30
 ASSETS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
+
+
+class RequestTooLargeError(ValueError):
+    pass
+
+
+class UnsupportedMediaTypeError(ValueError):
+    pass
 
 
 def get_data_dir(override: str | None = None) -> Path:
@@ -59,6 +75,16 @@ def is_tunneled_request(request) -> bool:
     """Check if the request is proxied or tunneled."""
     # Check for X-Forwarded-For or Forwarded header
     if 'X-Forwarded-For' in request.headers or 'Forwarded' in request.headers:
+        return True
+
+    # A spoofable Host header must not make a direct network peer look local.
+    try:
+        peer_ip = ipaddress.ip_address(request.client_address[0])
+        if isinstance(peer_ip, ipaddress.IPv6Address) and peer_ip.ipv4_mapped:
+            peer_ip = peer_ip.ipv4_mapped
+        if not peer_ip.is_loopback:
+            return True
+    except (AttributeError, IndexError, TypeError, ValueError):
         return True
     
     # Check if Host is localhost or 127.0.0.1 or [::1]
@@ -181,6 +207,8 @@ class ScoreboardStore:
         self.settings_path = self.data_dir / "settings.json"
         self._lock = threading.RLock()
         self._failed_pins = []  # Timestamps of failed attempts
+        self._remote_proposal_attempts: deque[float] = deque()
+        self._remote_proposal_rate_lock = threading.Lock()
         self._ensure_initialized()
 
     def _ensure_initialized(self):
@@ -325,7 +353,7 @@ class ScoreboardStore:
         default_dir = self.data_dir / "backups"
         if self.settings_path.is_file():
             try:
-                cfg = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                cfg = self._load_settings()
                 raw = str(cfg.get("backup_dir", "")).strip()
                 if raw:
                     p = Path(raw).expanduser()
@@ -342,16 +370,46 @@ class ScoreboardStore:
             raise ValueError("Backup folder path cannot be empty.")
         p.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            cfg = {}
-            if self.settings_path.is_file():
-                try:
-                    cfg = json.loads(self.settings_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    cfg = {}
+            cfg = self._load_settings()
             cfg["backup_dir"] = str(p)
             self._write_json(self.settings_path, cfg)
         self.ensure_daily_backup()
         return p
+
+    def _load_settings(self) -> dict[str, Any]:
+        if not self.settings_path.is_file():
+            return {}
+        try:
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def rotate_api_token(self, pin: str) -> str:
+        self.verify_pin(pin)
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            settings = self._load_settings()
+            settings["api_token_sha256"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            self._write_json(self.settings_path, settings)
+        return token
+
+    def verify_api_token(self, token: str) -> bool:
+        stored_hash = self._load_settings().get("api_token_sha256")
+        if not isinstance(stored_hash, str) or len(stored_hash) != 64:
+            return False
+        candidate_hash = hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+        return hmac.compare_digest(candidate_hash, stored_hash)
+
+    def allow_remote_proposal(self) -> bool:
+        now = time.monotonic()
+        with self._remote_proposal_rate_lock:
+            while self._remote_proposal_attempts and now - self._remote_proposal_attempts[0] >= 60:
+                self._remote_proposal_attempts.popleft()
+            if len(self._remote_proposal_attempts) >= REMOTE_PROPOSALS_PER_MINUTE:
+                return False
+            self._remote_proposal_attempts.append(now)
+            return True
 
     def ensure_daily_backup(self) -> Path | None:
         """Automatically save one daily backup if today's file does not exist yet."""
@@ -426,6 +484,9 @@ class ScoreboardStore:
                 data["pin_hash"] = None
                 data["ledger"] = []
                 self._write_json(self.scoreboard_path, data)
+                settings = self._load_settings()
+                if settings.pop("api_token_sha256", None) is not None:
+                    self._write_json(self.settings_path, settings)
                 self.regenerate_brief()
                 return backup_path
 
@@ -499,12 +560,19 @@ class ScoreboardStore:
         agent = agent.strip()
         category = category.strip()
         reason = reason.strip()
+        proposed_by = proposed_by.strip() or "agent"
         if not agent:
             raise ValueError("Agent name is required.")
+        if len(agent) > MAX_AGENT_NAME_LENGTH:
+            raise ValueError(f"Agent name must be {MAX_AGENT_NAME_LENGTH} characters or fewer.")
         if delta not in (-1, 1):
             raise ValueError("Delta must be +1 or -1.")
         if not reason:
             raise ValueError("Reason is required so the human can review why this score is proposed.")
+        if len(reason) > MAX_PROPOSAL_REASON_LENGTH:
+            raise ValueError(f"Reason must be {MAX_PROPOSAL_REASON_LENGTH} characters or fewer.")
+        if len(proposed_by) > MAX_PROPOSED_BY_LENGTH:
+            raise ValueError(f"Submitter name must be {MAX_PROPOSED_BY_LENGTH} characters or fewer.")
 
         with self._lock:
             with FileLock(self.pending_path):
@@ -518,6 +586,8 @@ class ScoreboardStore:
                         f"Unknown category '{category}'. Allowed: {', '.join(data['categories'])}"
                     )
                 pending = self.load_pending()
+                if len(pending) >= MAX_PENDING_PROPOSALS:
+                    raise ValueError(f"Pending queue is full ({MAX_PENDING_PROPOSALS} proposals). Review or remove items before adding more.")
                 proposal = {
                     "id": f"pen_{secrets.token_hex(6)}",
                     "ts": _utc_now(),
@@ -525,7 +595,7 @@ class ScoreboardStore:
                     "category": matched_cat,
                     "delta": int(delta),
                     "reason": reason,
-                    "proposed_by": proposed_by.strip() or "agent",
+                    "proposed_by": proposed_by,
                 }
                 pending.append(proposal)
                 self._write_json(self.pending_path, {"pending": pending})
@@ -785,6 +855,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <nav class="segmented" role="tablist" aria-label="Main navigation">
     <button role="tab" id="tab-board" aria-selected="true" aria-controls="panel-board" data-tab="board">Leaderboard</button>
     <button role="tab" id="tab-backup" aria-selected="false" aria-controls="panel-backup" data-tab="backup">Backup</button>
+    <button role="tab" id="tab-connect" aria-selected="false" aria-controls="panel-connect" data-tab="connect">Remote Access</button>
     <button role="tab" id="tab-faq" aria-selected="false" aria-controls="panel-faq" data-tab="faq">FAQ</button>
     <button role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about" data-tab="about">About Us</button>
   </nav>
@@ -877,6 +948,24 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="card"><h2>Saved Backups</h2><div id="backupList" class="empty" aria-live="polite">Loading backups…</div></div>
   </section>
 
+  <section class="tab-panel" id="panel-connect" role="tabpanel" aria-labelledby="tab-connect" hidden>
+    <div class="card">
+      <h2>Secure Remote Agent Access</h2>
+      <p class="muted">The app is local-only by default. If you connect it through a public HTTPS tunnel, remote agents must use a bearer token to read warnings or submit score proposals.</p>
+      <p class="muted">Unlock with your Owner PIN, then generate a token. Generating a new token immediately revokes the previous one. The token is shown once; save it in your remote action's authorization settings.</p>
+      <div class="row" style="margin-top:12px;">
+        <button class="primary" data-action="openGenerateApiToken">Generate / Replace API Token</button>
+      </div>
+      <div id="apiTokenResult" style="display:none; margin-top:16px;">
+        <label for="apiTokenValue" class="muted">Copy this token now. It will not be shown again.</label>
+        <div class="row" style="margin-top:8px;">
+          <input id="apiTokenValue" type="text" readonly autocomplete="off" spellcheck="false" style="flex:1; min-width:260px;">
+          <button data-action="copyApiToken">Copy Token</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="tab-panel" id="panel-faq" role="tabpanel" aria-labelledby="tab-faq" hidden>
     <div class="card">
       <h2>Frequently Asked Questions</h2>
@@ -896,7 +985,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <img class="company-logo" src="/assets/chinlung_logo.png" alt="Chinlung Technologies company logo">
         <div class="about-meta">
           <strong style="color:var(--text);font-size:18px;">Chinlung Technologies</strong>
-          <span>Agent Scoreboard v1.1.0 • MIT Open Source</span>
+          <span>Agent Scoreboard v1.2.0 • MIT Open Source</span>
           <span>Contact: <a href="mailto:chinlungtech@gmail.com">chinlungtech@gmail.com</a></span>
           <a href="https://github.com/leopollock21-sys/agent-scoreboard" target="_blank" rel="noopener noreferrer">View on GitHub</a>
         </div>
@@ -906,7 +995,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </section>
 
-  <footer><img class="footer-logo" src="/assets/chinlung_logo.png" alt=""><span>Chinlung Technologies • Agent Scoreboard v1.1.0</span></footer>
+  <footer><img class="footer-logo" src="/assets/chinlung_logo.png" alt=""><span>Chinlung Technologies • Agent Scoreboard v1.2.0</span></footer>
 </div>
 
 <dialog id="removeModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:420px; width:92%;">
@@ -943,6 +1032,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <div class="row" style="justify-content:flex-end;">
     <button data-action="closeDeleteBackupModal">Cancel</button>
     <button class="bad" data-action="confirmDeleteBackup">Delete</button>
+  </div>
+</dialog>
+
+<dialog id="apiTokenModal" style="background:#171b24; color:#eef1f6; border:1px solid #262c3a; border-radius:12px; padding:20px; max-width:440px; width:92%;">
+  <h2 style="margin:0 0 10px; font-size:16px;">Replace Remote API Token?</h2>
+  <p class="muted" style="margin:0 0 14px;">Any remote action using the current token will stop working. The new token is shown once.</p>
+  <div class="row" style="justify-content:flex-end;">
+    <button data-action="closeApiTokenModal">Cancel</button>
+    <button class="primary" data-action="confirmGenerateApiToken">Generate Token</button>
   </div>
 </dialog>
 
@@ -983,10 +1081,15 @@ document.addEventListener('click', (e) => {
   else if (action === 'confirmQuickScore') confirmQuickScore();
   else if (action === 'resolvePending') resolvePending(target.dataset.pendingId, target.dataset.actionType);
   else if (action === 'loadBackups') loadBackups();
+  else if (action === 'generateApiToken') generateApiToken();
+  else if (action === 'copyApiToken') copyApiToken();
+  else if (action === 'openGenerateApiToken') openGenerateApiToken();
+  else if (action === 'closeApiTokenModal') closeApiTokenModal();
+  else if (action === 'confirmGenerateApiToken') generateApiToken();
 });
 
 function changeTab(name) {
-  for (const tabName of ['board', 'backup', 'faq', 'about']) {
+  for (const tabName of ['board', 'backup', 'connect', 'faq', 'about']) {
     const selected = tabName === name;
     document.getElementById(`tab-${tabName}`).setAttribute('aria-selected', String(selected));
     document.getElementById(`panel-${tabName}`).hidden = !selected;
@@ -1096,7 +1199,48 @@ async function unlockUi() {
   } catch (err) { showError(err.message); }
 }
 
-function lockUi() { setSessionPin(""); loadState(); }
+function lockUi() {
+  setSessionPin("");
+  const result = document.getElementById("apiTokenResult");
+  const tokenInput = document.getElementById("apiTokenValue");
+  if (result) result.style.display = "none";
+  if (tokenInput) tokenInput.value = "";
+  loadState();
+}
+
+async function generateApiToken() {
+  closeApiTokenModal();
+  try {
+    const result = await api("/api/api-token", { method: "POST", body: "{}" });
+    document.getElementById("apiTokenValue").value = result.token;
+    document.getElementById("apiTokenResult").style.display = "block";
+  } catch (err) { showError(err.message); }
+}
+
+function openGenerateApiToken() {
+  if (!requireUnlockedPin()) return;
+  const dlg = document.getElementById("apiTokenModal");
+  if (dlg.showModal) dlg.showModal();
+  else dlg.setAttribute("open", "");
+}
+
+function closeApiTokenModal() {
+  const dlg = document.getElementById("apiTokenModal");
+  if (dlg.close) dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+async function copyApiToken() {
+  const tokenInput = document.getElementById("apiTokenValue");
+  if (!tokenInput || !tokenInput.value) return;
+  tokenInput.focus();
+  tokenInput.select();
+  try {
+    await navigator.clipboard.writeText(tokenInput.value);
+  } catch (_) {
+    showError("Token selected. Copy it now and store it in your remote action settings.");
+  }
+}
 
 function openResetPinModal() {
   const dlg = document.getElementById("resetPinModal");
@@ -1423,20 +1567,49 @@ def make_handler(store: ScoreboardStore):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def _read_body(self) -> dict[str, Any]:
+            if self.headers.get_content_type() != "application/json":
+                raise UnsupportedMediaTypeError("Content-Type must be application/json.")
             length = int(self.headers.get("Content-Length", "0") or "0")
+            if length < 0:
+                raise ValueError("Content-Length cannot be negative.")
+            if length > MAX_REQUEST_BODY_BYTES:
+                raise RequestTooLargeError(f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes.")
             raw = self.rfile.read(length) if length > 0 else b"{}"
-            return json.loads(raw.decode("utf-8") or "{}")
+            body = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(body, dict):
+                raise ValueError("Request body must be a JSON object.")
+            return body
+
+        def _has_valid_bearer_token(self) -> bool:
+            authorization = self.headers.get("Authorization", "").strip()
+            scheme, separator, token = authorization.partition(" ")
+            return bool(separator and scheme.lower() == "bearer" and store.verify_api_token(token.strip()))
+
+        def _send_unauthorized(self) -> None:
+            self.send_response(HTTPStatus.UNAUTHORIZED)
+            self.send_header("WWW-Authenticate", 'Bearer realm="Agent Scoreboard"')
+            self.send_header("Cache-Control", "no-store")
+            body = json.dumps({"error": "Valid bearer token required."}).encode("utf-8")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
-            # Tunnel security: Reject non-local/proxied requests for all except GET /api/warnings
-            if is_tunneled_request(self) and parsed.path != "/api/warnings":
+            tunneled = is_tunneled_request(self)
+            # Only the explicitly documented agent read endpoint can cross a public tunnel.
+            if tunneled and parsed.path != "/api/warnings":
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Access denied over tunnel"})
+                return
+            if tunneled and not self._has_valid_bearer_token():
+                self._send_unauthorized()
                 return
 
             if parsed.path == "/favicon.ico":
@@ -1539,17 +1712,38 @@ def make_handler(store: ScoreboardStore):
 
         def do_POST(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
-            # Tunnel security: Reject non-local/proxied requests for all except POST /api/propose
-            if is_tunneled_request(self) and parsed.path != "/api/propose":
-                length = min(int(self.headers.get("Content-Length", "0") or "0"), 65536)
-                if length > 0:
-                    self.rfile.read(length)
+            tunneled = is_tunneled_request(self)
+            # Only the documented agent proposal endpoint can cross a public tunnel.
+            if tunneled and parsed.path != "/api/propose":
+                self.close_connection = True
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Access denied over tunnel"})
                 return
+            if tunneled and not self._has_valid_bearer_token():
+                self.close_connection = True
+                self._send_unauthorized()
+                return
+            if tunneled and not store.allow_remote_proposal():
+                self.close_connection = True
+                self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many remote proposals. Try again in a minute."})
+                return
+
+            if not tunneled:
+                origin = self.headers.get("Origin")
+                host = self.headers.get("Host", "").strip().lower()
+                expected_origin = f"http://{host}" if host else ""
+                if origin and origin != expected_origin:
+                    self.close_connection = True
+                    self._send_json(HTTPStatus.FORBIDDEN, {"error": "Cross-origin requests are not allowed."})
+                    return
 
             try:
                 body = self._read_body()
                 pin = self.headers.get("X-Scoreboard-Pin", "").strip() or str(body.get("pin", "")).strip()
+
+                if parsed.path == "/api/api-token":
+                    token = store.rotate_api_token(pin)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "token": token})
+                    return
 
                 if parsed.path == "/api/pin/setup":
                     store.set_pin(str(body.get("pin", "")))
@@ -1643,6 +1837,11 @@ def make_handler(store: ScoreboardStore):
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except PermissionError as exc:
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": str(exc)})
+            except RequestTooLargeError as exc:
+                self.close_connection = True
+                self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(exc)})
+            except UnsupportedMediaTypeError as exc:
+                self._send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": str(exc)})
             except KeyError as exc:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             except (ValueError, RuntimeError, json.JSONDecodeError) as exc:

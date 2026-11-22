@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-11-22
+### Security
+- Require an owner-generated bearer token for warnings and score proposals received through public tunnels.
+- Add request, proposal field, queue, and remote proposal rate limits.
+- Reject cross-origin local browser POSTs and non-JSON request bodies.
+- Ignore runtime settings and backup JSON files so local data is not staged for public release.
+
 ## [1.1.0] - 2026-11-21
 ### Added
 - Apple-inspired dark interface with Leaderboard, Backup, FAQ, and About Us tabs.

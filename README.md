@@ -50,8 +50,11 @@ python scoreboard.py propose --agent "Codex" --category "Trust" --delta 1 --reas
 ```
 
 ### 4. ChatGPT (Custom GPT Actions)
-Because ChatGPT runs in OpenAI's cloud, expose your local server via a temporary HTTPS tunnel (for example, `cloudflared tunnel --url http://127.0.0.1:8787`), then import `chatgpt/openapi.json` into a Custom GPT Action and replace the server URL.
-*Note: For security, administrative UI routes are blocked when accessed via public tunnels.*
+Because ChatGPT runs in OpenAI's cloud, first open the local Leaderboard UI, unlock with your Owner PIN, and choose **Remote Access → Generate / Replace API Token**. Copy the token into the Custom GPT Action's bearer-token authentication settings. The token is shown once; generating another one revokes the previous token.
+
+Then expose the local server through a temporary HTTPS tunnel (for example, `cloudflared tunnel --url http://127.0.0.1:8787`), import `chatgpt/openapi.json`, and replace the placeholder server URL. Only the authenticated `/api/warnings` and `/api/propose` routes work through a tunnel. Keep the bearer token private and stop the tunnel when it is not needed. Without a token, tunnel requests to those routes are rejected.
+
+Remote proposals are bounded by request, field, queue, and rate limits and still require owner PIN approval before they affect official scores. Local browser POSTs must use JSON and same-origin requests.
 
 ## Run Tests
 ```bash

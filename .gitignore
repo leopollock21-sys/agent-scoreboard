@@ -5,6 +5,8 @@ __pycache__/
 scoreboard.json
 pending.json
 agent_brief.md
+settings.json
+scoreboard.*.json
 *.tmp
 build/
 dist/

@@ -7,6 +7,7 @@ import json
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,7 +15,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import mcp_server
-from scoreboard import DEFAULT_CATEGORIES, ScoreboardStore, make_handler
+from scoreboard import DEFAULT_CATEGORIES, MAX_PENDING_PROPOSALS, REMOTE_PROPOSALS_PER_MINUTE, ScoreboardStore, is_tunneled_request, make_handler
 
 
 class TestScoreboardCore(unittest.TestCase):
@@ -107,6 +108,43 @@ class TestScoreboardCore(unittest.TestCase):
         if not any(r["agent"] == "Antigravity" for r in board["leaderboard"]):
             self.store.add_agent("Antigravity", "AI coding assistant", "4321")
 
+    def test_api_tokens_are_pin_gated_and_only_hashes_are_stored(self) -> None:
+        self.store.set_pin("8642")
+        with self.assertRaises(PermissionError):
+            self.store.rotate_api_token("0000")
+
+        first = self.store.rotate_api_token("8642")
+        self.assertTrue(self.store.verify_api_token(first))
+        settings = json.loads(self.store.settings_path.read_text(encoding="utf-8"))
+        self.assertNotIn(first, json.dumps(settings))
+        self.assertEqual(len(settings["api_token_sha256"]), 64)
+
+        second = self.store.rotate_api_token("8642")
+        self.assertFalse(self.store.verify_api_token(first))
+        self.assertTrue(self.store.verify_api_token(second))
+        self.store.reset_pin_and_archive()
+        self.assertFalse(self.store.verify_api_token(second))
+
+    def test_proposals_have_field_and_queue_limits(self) -> None:
+        with self.assertRaises(ValueError):
+            self.store.propose_score(
+                agent="Claude", category="Trust", delta=1,
+                reason="x" * 2001, proposed_by="Codex",
+            )
+
+        pending = [{"id": f"pen_{index}"} for index in range(MAX_PENDING_PROPOSALS)]
+        self.store._write_json(self.store.pending_path, {"pending": pending})
+        with self.assertRaisesRegex(ValueError, "Pending queue is full"):
+            self.store.propose_score(
+                agent="Claude", category="Trust", delta=1,
+                reason="Valid bounded reason", proposed_by="Codex",
+            )
+
+    def test_remote_proposal_rate_limit(self) -> None:
+        for _ in range(REMOTE_PROPOSALS_PER_MINUTE):
+            self.assertTrue(self.store.allow_remote_proposal())
+        self.assertFalse(self.store.allow_remote_proposal())
+
     def test_tamper_detection_blocks_cheating(self) -> None:
         self.store.set_pin("2468")
         self.store.record_score(
@@ -150,6 +188,8 @@ class TestHttpAndMcp(unittest.TestCase):
     def _req_bytes(self, path: str, method: str = "GET", body: dict | None = None, pin: str = "", headers: dict | None = None) -> tuple[int, dict[str, str], bytes]:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req_headers = {"Content-Type": "application/json"} if data is not None else {}
+        if method == "POST":
+            req_headers.setdefault("Origin", f"http://127.0.0.1:{self.port}")
         if headers:
             req_headers.update(headers)
         if pin:
@@ -255,6 +295,53 @@ class TestHttpAndMcp(unittest.TestCase):
             "Clear, polite, plain language",
         )
 
+    def test_http_api_token_generation_and_local_csrf_guards(self) -> None:
+        status, _ = self._req("/api/pin/setup", "POST", {"pin": "5555"})
+        self.assertEqual(status, 200)
+
+        status, _ = self._req("/api/api-token", "POST", {}, headers={"Origin": "https://attacker.example"})
+        self.assertEqual(status, 403)
+        status, _ = self._req("/api/api-token", "POST", {})
+        self.assertEqual(status, 401)
+
+        status, token_text = self._req("/api/api-token", "POST", {}, pin="5555")
+        self.assertEqual(status, 200)
+        token = json.loads(token_text)["token"]
+        self.assertTrue(self.store.verify_api_token(token))
+
+        status, _ = self._req(
+            "/api/pin/reset", "POST", {}, headers={"Origin": "https://attacker.example"}
+        )
+        self.assertEqual(status, 403)
+        self.assertTrue(json.loads(self._req("/api/state")[1])["has_pin"])
+
+        status, _ = self._req(
+            "/api/pin/reset", "POST", {}, headers={"Content-Type": "text/plain"}
+        )
+        self.assertEqual(status, 415)
+
+        status, html = self._req("/")
+        self.assertEqual(status, 200)
+        self.assertIn("Remote Access", html)
+        self.assertIn("Generate / Replace API Token", html)
+
+    def test_http_rejects_oversized_request_body(self) -> None:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/propose",
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": "65537",
+                "Origin": f"http://127.0.0.1:{self.port}",
+            },
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            self.fail("Expected an oversized request to be rejected.")
+        except urllib.error.HTTPError as err:
+            self.assertEqual(err.code, 413)
+        self.assertEqual(self.store.load_pending(), [])
+
     def test_mcp_server_only_exposes_safe_tools(self) -> None:
         init_resp = mcp_server.handle_request(self.store, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(init_resp["result"]["serverInfo"]["name"], "agent-scoreboard")
@@ -286,13 +373,28 @@ class TestHttpAndMcp(unittest.TestCase):
         self.assertEqual(payload["status"], "pending_human_approval")
 
     def test_tunnel_security(self) -> None:
+        self.assertTrue(is_tunneled_request(SimpleNamespace(
+            headers={"Host": "localhost"}, client_address=("192.0.2.10", 8000)
+        )))
+        self.assertFalse(is_tunneled_request(SimpleNamespace(
+            headers={"Host": "localhost"}, client_address=("127.0.0.1", 8000)
+        )))
+
         status, _ = self._req("/", headers={"X-Forwarded-For": "1.2.3.4"})
         self.assertEqual(status, 403)
 
         status, _ = self._req("/api/warnings", headers={"X-Forwarded-For": "1.2.3.4"})
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 401)
 
         status, _ = self._req("/api/warnings?agent=Claude", headers={"X-Forwarded-For": "1.2.3.4"})
+        self.assertEqual(status, 401)
+
+        self.store.set_pin("5555")
+        token = self.store.rotate_api_token("5555")
+        bearer = {"X-Forwarded-For": "1.2.3.4", "Authorization": f"Bearer {token}"}
+        status, _ = self._req("/api/warnings", headers=bearer)
+        self.assertEqual(status, 200)
+        status, _ = self._req("/api/warnings?agent=Claude", headers=bearer)
         self.assertEqual(status, 200)
 
         status, _ = self._req(
@@ -307,9 +409,17 @@ class TestHttpAndMcp(unittest.TestCase):
             "/api/propose",
             "POST",
             {"agent": "Claude", "category": "Trust", "delta": 1, "reason": "R"},
-            headers={"X-Forwarded-For": "1.2.3.4"},
+            headers=bearer,
         )
         self.assertEqual(status, 200)
+
+        status, _ = self._req(
+            "/api/propose",
+            "POST",
+            {"agent": "Claude", "category": "Trust", "delta": 1, "reason": "R"},
+            headers={"X-Forwarded-For": "1.2.3.4"},
+        )
+        self.assertEqual(status, 401)
 
         # Host header spoofing (localhost.evil.com) must also be blocked
         status, _ = self._req("/", headers={"Host": "localhost.evil.com"})
