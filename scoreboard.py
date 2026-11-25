@@ -30,6 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import auto_judge
+
 DEFAULT_CATEGORIES = ["Affection", "Trust", "Faith", "Execution", "Wisdom"]
 DEFAULT_AGENTS = [
     ("Antigravity", "Antigravity AI coding assistant"),
@@ -792,7 +794,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .banner.tamper { background:rgba(255,69,58,.12); border:1px solid var(--red); color:#ffb4ad; }
   .banner.error { background:rgba(255,214,10,.1); border:1px solid var(--amber); color:#ffe985; }
   .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-  input,select { background:#0d0f13; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px 13px; min-height:44px; font-size:14px; }
+  input,select,textarea { background:#0d0f13; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px 13px; min-height:44px; font-size:14px; font-family:inherit; }
+  textarea { width:100%; min-height:84px; resize:vertical; }
+  .switch-row { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:#111318; margin-bottom:14px; cursor:pointer; }
+  .switch-row input[type="checkbox"] { width:20px; height:20px; min-height:20px; accent-color:var(--accent); cursor:pointer; }
+  .field-group { display:grid; gap:6px; margin-bottom:12px; }
+  .field-label { font-size:13px; color:var(--muted); font-weight:500; }
+  .aj-card-info { padding:14px 16px; border-radius:12px; border:1px solid var(--line); background:#111318; margin-bottom:14px; }
+  .badge.SKIPPED,.badge.DUPLICATE { background:rgba(152,154,164,.16); color:#c5c7d0; }
   button { min-height:44px; padding:9px 15px; border-radius:11px; border:1px solid var(--line); background:#202229; color:var(--text); font-weight:600; cursor:pointer; font-size:14px; transition:background .15s ease,border-color .15s ease; }
   button:hover { background:#2a2c34; }
   button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
@@ -854,6 +863,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <nav class="segmented" role="tablist" aria-label="Main navigation">
     <button role="tab" id="tab-board" aria-selected="true" aria-controls="panel-board" data-tab="board">Leaderboard</button>
+    <button role="tab" id="tab-auto-judge" aria-selected="false" aria-controls="panel-auto-judge" data-tab="auto-judge">Auto-Judge</button>
     <button role="tab" id="tab-backup" aria-selected="false" aria-controls="panel-backup" data-tab="backup">Backup</button>
     <button role="tab" id="tab-connect" aria-selected="false" aria-controls="panel-connect" data-tab="connect">Remote Access</button>
     <button role="tab" id="tab-faq" aria-selected="false" aria-controls="panel-faq" data-tab="faq">FAQ</button>
@@ -928,6 +938,108 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div id="historyList" class="empty">No scores recorded yet.</div>
   </div>
   </main>
+
+  <section class="tab-panel" id="panel-auto-judge" role="tabpanel" aria-labelledby="tab-auto-judge" hidden>
+    <div class="banner error" id="ajErrorBanner" role="alert"></div>
+
+    <div class="card" id="ajOffCard" style="display:none;">
+      <h2>Auto-Judge Is Turned Off</h2>
+      <p class="muted" style="margin:0;">Turn on Auto-Judge below to let a separate AI quietly review finished Antigravity tasks and drop score suggestions into <strong>Pending Approvals</strong>. Nothing ever updates your official leaderboard without your Owner PIN.</p>
+    </div>
+
+    <div class="card" id="ajStatusCard" style="display:none;">
+      <div class="row" style="justify-content:space-between; margin-bottom:10px;">
+        <h2 style="margin:0;">Latest Auto-Judge Check</h2>
+        <span class="badge" id="ajStatusBadge">Ready</span>
+      </div>
+      <div id="ajStatusBody" class="muted"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h2>Auto-Judge Settings</h2>
+        <label class="switch-row" for="ajEnabled">
+          <div>
+            <strong>Turn on Auto-Judge</strong>
+            <div class="muted">Automatically check finished Antigravity tasks in the background</div>
+          </div>
+          <input type="checkbox" id="ajEnabled">
+        </label>
+
+        <div class="field-group">
+          <label class="field-label" for="ajProvider">Judge AI Provider</label>
+          <select id="ajProvider">
+            <option value="gemini">Google Gemini Flash</option>
+            <option value="openai">OpenAI Mini</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Local AI (Ollama)</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="ajModel">Model Name</label>
+          <input type="text" id="ajModel" placeholder="e.g. gemini-2.5-flash">
+        </div>
+
+        <div class="field-group" id="ajApiKeyGroup">
+          <label class="field-label" for="ajApiKey">API Key (kept private on your computer)</label>
+          <div class="row">
+            <input type="password" id="ajApiKey" placeholder="Paste new API key (leave blank to keep saved)" autocomplete="off" style="flex:1; min-width:200px;">
+            <button id="ajClearKeyBtn" data-action="clearAutoJudgeKey" style="display:none;">Clear Key</button>
+          </div>
+          <div class="muted" id="ajKeyStatus">Checking key status…</div>
+          <label class="row" style="gap:8px; cursor:pointer; margin-top:4px;">
+            <input type="checkbox" id="ajUseEnvKey" style="width:18px; height:18px; min-height:18px;">
+            <span class="muted">Also use my computer's saved system key if the box above is blank</span>
+          </label>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="ajBaseUrl">Custom Server Address (optional, mainly for Local AI)</label>
+          <input type="text" id="ajBaseUrl" placeholder="Leave blank for default (Ollama: http://127.0.0.1:11434)">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="ajMode">When to Suggest a Score</label>
+          <select id="ajMode">
+            <option value="notable_only">Only clear wins &amp; mistakes (Recommended)</option>
+            <option value="every_task">Every finished task</option>
+          </select>
+        </div>
+
+        <div class="row" style="margin-top:14px;">
+          <button class="primary" id="ajSaveBtn" data-action="saveAutoJudge">Save Settings</button>
+          <button id="ajTestBtn" data-action="testAutoJudge">Test Judge</button>
+        </div>
+        <div class="muted" id="ajFeedback" aria-live="polite" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Judge Last Work</h2>
+        <p class="muted" style="margin-top:0;">Want an instant second opinion on Codex, ChatGPT, or another agent? Pick the agent, paste what it did, and Auto-Judge will place a score suggestion in Pending Approvals.</p>
+
+        <div class="field-group">
+          <label class="field-label" for="ajRunAgent">Which Agent Did the Work?</label>
+          <select id="ajRunAgent"></select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="ajRunCwd">Project Folder Path (optional)</label>
+          <input type="text" id="ajRunCwd" placeholder="Optional folder path to include recent git changes">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="ajRunSummary">What Happened?</label>
+          <textarea id="ajRunSummary" placeholder="e.g. Codex fixed the login bug and all 14 unit tests passed, or ChatGPT guessed a file path without checking."></textarea>
+        </div>
+
+        <div class="row">
+          <button class="primary" id="ajRunBtn" data-action="runAutoJudgeManual">Judge Last Work</button>
+        </div>
+        <div class="muted" id="ajRunResult" aria-live="polite" style="margin-top:10px;"></div>
+      </div>
+    </div>
+  </section>
 
   <section class="tab-panel" id="panel-backup" role="tabpanel" aria-labelledby="tab-backup" hidden>
     <div class="card">
@@ -1046,6 +1158,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 <script>
 let STATE = null;
+let AJ_CFG = null;
 let QUICK_CTX = null;
 let REMOVE_TARGET = null;
 let DELETE_BACKUP_TARGET = null;
@@ -1086,15 +1199,26 @@ document.addEventListener('click', (e) => {
   else if (action === 'openGenerateApiToken') openGenerateApiToken();
   else if (action === 'closeApiTokenModal') closeApiTokenModal();
   else if (action === 'confirmGenerateApiToken') generateApiToken();
+  else if (action === 'loadAutoJudge') loadAutoJudge();
+  else if (action === 'saveAutoJudge') saveAutoJudge();
+  else if (action === 'clearAutoJudgeKey') clearAutoJudgeKey();
+  else if (action === 'testAutoJudge') testAutoJudge();
+  else if (action === 'runAutoJudgeManual') runAutoJudgeManual();
 });
 
+const ajProviderEl = document.getElementById('ajProvider');
+if (ajProviderEl) {
+  ajProviderEl.addEventListener('change', () => onAjProviderChange());
+}
+
 function changeTab(name) {
-  for (const tabName of ['board', 'backup', 'connect', 'faq', 'about']) {
+  for (const tabName of ['board', 'auto-judge', 'backup', 'connect', 'faq', 'about']) {
     const selected = tabName === name;
     document.getElementById(`tab-${tabName}`).setAttribute('aria-selected', String(selected));
     document.getElementById(`panel-${tabName}`).hidden = !selected;
   }
   if (name === 'backup') loadBackups();
+  if (name === 'auto-judge') loadAutoJudge();
 }
 
 async function loadBackups() {
@@ -1480,6 +1604,15 @@ function render() {
   catSel.innerHTML = cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
   if (prevCat) catSel.value = prevCat;
 
+  const ajAgentSel = document.getElementById("ajRunAgent");
+  if (ajAgentSel) {
+    const prevAj = ajAgentSel.value;
+    const opts = ['<option value="">Auto-detect from summary</option>']
+      .concat(STATE.leaderboard.map(r => `<option value="${escapeHtml(r.agent)}">${escapeHtml(r.agent)}</option>`));
+    ajAgentSel.innerHTML = opts.join("");
+    if (prevAj) ajAgentSel.value = prevAj;
+  }
+
   // History
   const hist = document.getElementById("historyList");
   if (!STATE.history.length) {
@@ -1550,6 +1683,226 @@ async function confirmDeleteBackup() {
     document.getElementById("backupFolderNote").textContent = "Deleted backup: " + file;
     await loadBackups();
   } catch (err) { showError(err.message); }
+}
+
+function showAjError(msg) {
+  const el = document.getElementById("ajErrorBanner");
+  if (!el) return;
+  if (!msg) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "block";
+  el.innerHTML = `${escapeHtml(msg)} <button class="mini" data-action="loadAutoJudge" style="margin-left:10px;">Retry</button>`;
+}
+
+function updateAjKeyHint() {
+  const provider = document.getElementById("ajProvider").value;
+  const keyStatus = document.getElementById("ajKeyStatus");
+  const clearBtn = document.getElementById("ajClearKeyBtn");
+  const apiKeyInput = document.getElementById("ajApiKey");
+  if (provider === "ollama") {
+    keyStatus.textContent = "No API key needed for Local AI (Ollama).";
+    apiKeyInput.disabled = true;
+    clearBtn.style.display = "none";
+    return;
+  }
+  apiKeyInput.disabled = false;
+  if (!AJ_CFG) return;
+  const isCurrentProvider = AJ_CFG.provider === provider;
+  const envMap = AJ_CFG.env_keys_by_provider || {};
+  const hasEnv = Boolean(envMap[provider]);
+  if (isCurrentProvider && AJ_CFG.has_api_key) {
+    keyStatus.textContent = `Saved key ready (${AJ_CFG.api_key_masked})`;
+    clearBtn.style.display = "inline-flex";
+  } else if (hasEnv) {
+    const envLabel = isCurrentProvider && AJ_CFG.env_key_name ? ` (${AJ_CFG.env_key_name})` : "";
+    keyStatus.textContent = `System key ready${envLabel}.`;
+    clearBtn.style.display = "none";
+  } else {
+    keyStatus.textContent = "No API key saved yet for this provider.";
+    clearBtn.style.display = "none";
+  }
+}
+
+function onAjProviderChange() {
+  const provider = document.getElementById("ajProvider").value;
+  const defaults = (AJ_CFG && AJ_CFG.provider_defaults) || {
+    gemini: "gemini-2.5-flash",
+    openai: "gpt-4o-mini",
+    openrouter: "google/gemini-2.5-flash",
+    ollama: "llama3.2",
+  };
+  document.getElementById("ajModel").value = defaults[provider] || "";
+  updateAjKeyHint();
+}
+
+function renderAutoJudge() {
+  if (!AJ_CFG) return;
+  document.getElementById("ajEnabled").checked = Boolean(AJ_CFG.enabled);
+  document.getElementById("ajProvider").value = AJ_CFG.provider || "gemini";
+  document.getElementById("ajModel").value = AJ_CFG.model || "";
+  document.getElementById("ajMode").value = AJ_CFG.mode || "notable_only";
+  document.getElementById("ajUseEnvKey").checked = Boolean(AJ_CFG.use_env_key);
+  document.getElementById("ajBaseUrl").value = AJ_CFG.base_url || "";
+  document.getElementById("ajApiKey").value = "";
+  updateAjKeyHint();
+
+  const offCard = document.getElementById("ajOffCard");
+  const statusCard = document.getElementById("ajStatusCard");
+  const badge = document.getElementById("ajStatusBadge");
+  const body = document.getElementById("ajStatusBody");
+
+  const run = AJ_CFG.last_run;
+  if (!AJ_CFG.enabled && !run) {
+    offCard.style.display = "block";
+    statusCard.style.display = "none";
+    return;
+  }
+  offCard.style.display = AJ_CFG.enabled ? "none" : "block";
+  statusCard.style.display = "block";
+
+  if (!run) {
+    badge.className = "badge ACTIVE";
+    badge.textContent = "Ready";
+    body.textContent = "Auto-Judge is turned on and waiting for the next finished task.";
+    return;
+  }
+
+  const statusMap = {
+    proposed: { cls: "badge TRUSTED", label: "Suggested" },
+    skipped: { cls: "badge SKIPPED", label: "Skipped" },
+    duplicate: { cls: "badge DUPLICATE", label: "Already Checked" },
+    error: { cls: "badge WARNING", label: "Needs Attention" },
+  };
+  const info = statusMap[run.status] || { cls: "badge ACTIVE", label: run.status || "Checked" };
+  badge.className = info.cls;
+  badge.textContent = info.label;
+  let html = `<div><strong>${escapeHtml(run.summary || "")}</strong></div>`;
+  if (run.ts) html += `<div class="muted" style="margin-top:4px;">Checked at ${escapeHtml(run.ts)}</div>`;
+  body.innerHTML = html;
+}
+
+async function loadAutoJudge() {
+  showAjError("");
+  try {
+    AJ_CFG = await api("/api/auto-judge/config");
+    renderAutoJudge();
+  } catch (err) {
+    showAjError("Could not load Auto-Judge settings: " + err.message);
+  }
+}
+
+function collectAjFormBody(extra = {}) {
+  return Object.assign({
+    enabled: document.getElementById("ajEnabled").checked,
+    provider: document.getElementById("ajProvider").value,
+    model: document.getElementById("ajModel").value.trim(),
+    api_key: document.getElementById("ajApiKey").value.trim(),
+    use_env_key: document.getElementById("ajUseEnvKey").checked,
+    base_url: document.getElementById("ajBaseUrl").value.trim(),
+    mode: document.getElementById("ajMode").value,
+  }, extra);
+}
+
+async function saveAutoJudge() {
+  if (!requireUnlockedPin()) return;
+  showAjError("");
+  const btn = document.getElementById("ajSaveBtn");
+  const fb = document.getElementById("ajFeedback");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  fb.textContent = "";
+  try {
+    const res = await api("/api/auto-judge/config", { method: "POST", body: JSON.stringify(collectAjFormBody()) });
+    AJ_CFG = res.config;
+    renderAutoJudge();
+    fb.textContent = "Auto-Judge settings saved.";
+  } catch (err) {
+    showAjError(err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save Settings";
+  }
+}
+
+async function clearAutoJudgeKey() {
+  if (!requireUnlockedPin()) return;
+  showAjError("");
+  const fb = document.getElementById("ajFeedback");
+  try {
+    const res = await api("/api/auto-judge/config", {
+      method: "POST",
+      body: JSON.stringify(collectAjFormBody({ clear_api_key: true, api_key: "" })),
+    });
+    AJ_CFG = res.config;
+    renderAutoJudge();
+    fb.textContent = "Saved API key cleared.";
+  } catch (err) {
+    showAjError(err.message);
+  }
+}
+
+async function testAutoJudge() {
+  if (!requireUnlockedPin()) return;
+  showAjError("");
+  const btn = document.getElementById("ajTestBtn");
+  const fb = document.getElementById("ajFeedback");
+  btn.disabled = true;
+  btn.textContent = "Testing…";
+  fb.textContent = "Checking connection to your Judge AI…";
+  try {
+    const res = await api("/api/auto-judge/test", { method: "POST", body: JSON.stringify(collectAjFormBody()) });
+    if (res.ok) {
+      fb.textContent = res.message;
+    } else {
+      fb.textContent = "";
+      showAjError(res.message || "Connection test failed.");
+    }
+  } catch (err) {
+    fb.textContent = "";
+    showAjError(err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Test Judge";
+  }
+}
+
+async function runAutoJudgeManual() {
+  if (!requireUnlockedPin()) return;
+  showAjError("");
+  const agent = document.getElementById("ajRunAgent").value;
+  const cwd = document.getElementById("ajRunCwd").value.trim();
+  const summary = document.getElementById("ajRunSummary").value.trim();
+  if (!summary && !cwd) {
+    showAjError("Describe what the agent did or enter a project folder path first.");
+    return;
+  }
+  const btn = document.getElementById("ajRunBtn");
+  const out = document.getElementById("ajRunResult");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  out.textContent = "Auto-Judge is reviewing the work…";
+  try {
+    const res = await api("/api/auto-judge/run", {
+      method: "POST",
+      body: JSON.stringify({ agent, cwd, summary }),
+    });
+    if (res.ok) {
+      out.textContent = res.message + (res.status === "proposed" ? " Check Pending Approvals on the Leaderboard tab." : "");
+      if (res.status === "proposed") {
+        document.getElementById("ajRunSummary").value = "";
+        await loadState();
+      }
+      await loadAutoJudge();
+    } else {
+      out.textContent = "";
+      showAjError(res.message || "Could not evaluate work.");
+    }
+  } catch (err) {
+    out.textContent = "";
+    showAjError(err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Judge Last Work";
+  }
 }
 
 loadState();
@@ -1711,6 +2064,10 @@ def make_handler(store: ScoreboardStore):
                 self._send_json(HTTPStatus.OK, store.get_agent_warnings(agent))
                 return
 
+            if parsed.path == "/api/auto-judge/config":
+                self._send_json(HTTPStatus.OK, auto_judge.get_public_config(store.data_dir))
+                return
+
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
         def _send_asset(self, path: Path, content_type: str) -> None:
@@ -1762,6 +2119,29 @@ def make_handler(store: ScoreboardStore):
                 if parsed.path == "/api/api-token":
                     token = store.rotate_api_token(pin)
                     self._send_json(HTTPStatus.OK, {"ok": True, "token": token})
+                    return
+
+                if parsed.path == "/api/auto-judge/config":
+                    store.verify_pin(pin)
+                    cfg = auto_judge.save_config(store.data_dir, body)
+                    self._send_json(HTTPStatus.OK, {"ok": True, "config": cfg})
+                    return
+
+                if parsed.path == "/api/auto-judge/test":
+                    store.verify_pin(pin)
+                    res = auto_judge.test_connection(store.data_dir, overrides=body if body else None)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if parsed.path == "/api/auto-judge/run":
+                    store.verify_pin(pin)
+                    res = auto_judge.evaluate_manual(
+                        store=store,
+                        agent=str(body.get("agent", "")),
+                        summary=str(body.get("summary", "")),
+                        cwd=str(body.get("cwd", "")),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
                     return
 
                 if parsed.path == "/api/pin/setup":

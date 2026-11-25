@@ -19,8 +19,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from scoreboard import ScoreboardStore
 
 
-def install_antigravity_plugin() -> Path:
-    dest = Path.home() / ".gemini" / "config" / "plugins" / "agent-scoreboard"
+def install_antigravity_plugin(dest: Path | None = None) -> Path:
+    if dest is None:
+        dest = Path.home() / ".gemini" / "config" / "plugins" / "agent-scoreboard"
     (dest / "assets").mkdir(parents=True, exist_ok=True)
     (dest / "skills" / "agent-scoreboard").mkdir(parents=True, exist_ok=True)
     (dest / "rules").mkdir(parents=True, exist_ok=True)
@@ -44,6 +45,22 @@ def install_antigravity_plugin() -> Path:
     }
     (dest / "mcp_config.json").write_text(
         json.dumps(mcp_cfg, indent=2) + "\n", encoding="utf-8"
+    )
+
+    auto_judge_path = str((REPO_ROOT / "auto_judge.py").resolve())
+    hooks_cfg = {
+        "agent-scoreboard-auto-judge": {
+            "Stop": [
+                {
+                    "type": "command",
+                    "command": f'"{sys.executable}" "{auto_judge_path}" --hook',
+                    "timeout": 10,
+                }
+            ]
+        }
+    }
+    (dest / "hooks.json").write_text(
+        json.dumps(hooks_cfg, indent=2) + "\n", encoding="utf-8"
     )
     return dest
 

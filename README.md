@@ -58,8 +58,15 @@ Remote proposals are bounded by request, field, queue, and rate limits and still
 
 ## Run Tests
 ```bash
-python -m unittest test_scoreboard.py -v
+python -m unittest discover -v
 ```
+
+## Auto-Judge (Optional)
+Auto-Judge lets a separate AI review finished work and place score suggestions into **Pending Approvals**—it is off by default and never changes official scores without your Owner PIN.
+
+1. Open the Leaderboard UI and go to the **Auto-Judge** tab.
+2. Turn on Auto-Judge, pick a provider (**Google Gemini Flash**, **OpenAI Mini**, **OpenRouter**, or **Local AI (Ollama)**), paste your API key (or use a saved environment key like `GEMINI_API_KEY`), and click **Save Settings** + **Test Judge**.
+3. Run `python install.py` so Antigravity automatically checks finished tasks in the background after non-trivial turns. For Codex, ChatGPT, or manual checks, use the **Judge Last Work** card on the Auto-Judge tab (or `python auto_judge.py --manual --agent "Codex" --summary "..."`).
 
 ## Forgot Your PIN?
 Because scores are signed with your PIN, a forgotten PIN cannot be recovered. Click **Forgot PIN?** next to the Unlock button in the Leaderboard UI and confirm **Start Fresh**—this saves a backup of your old scores, keeps all your agents, and lets you set a new PIN with zero commands. You can also manage, download, or delete old backup files directly from the **Backup** tab.
