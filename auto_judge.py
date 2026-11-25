@@ -573,40 +573,57 @@ def _http_post_json(
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req_headers = {"Content-Type": "application/json", **headers}
-    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw)
-    except urllib.error.HTTPError as err:
-        detail = ""
+    attempts = 2
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
         try:
-            err_body = err.read().decode("utf-8", errors="replace")
-            parsed_err = json.loads(err_body)
-            if isinstance(parsed_err, dict):
-                e_obj = parsed_err.get("error")
-                if isinstance(e_obj, dict):
-                    detail = str(e_obj.get("message") or "")
-                elif isinstance(e_obj, str):
-                    detail = e_obj
-        except Exception:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw)
+        except urllib.error.HTTPError as err:
+            if err.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                time.sleep(2)
+                continue
             detail = ""
-        if err.code in (401, 403):
-            raise RuntimeError("API key was rejected or lacks permission.") from err
-        if err.code == 429:
-            raise RuntimeError("Rate limit reached on the AI provider. Try again shortly.") from err
-        if err.code == 404:
-            raise RuntimeError(f"Model or endpoint was not found (HTTP 404). {detail}".strip()) from err
-        msg = f"AI provider returned HTTP {err.code}."
-        if detail:
-            msg += f" {mask_secrets(detail)[:180]}"
-        raise RuntimeError(msg) from err
-    except urllib.error.URLError as err:
-        raise RuntimeError(f"Could not reach the AI provider ({err.reason}).") from err
-    except TimeoutError as err:
-        raise RuntimeError("AI provider timed out before responding.") from err
-    except json.JSONDecodeError as err:
-        raise RuntimeError("AI provider returned invalid JSON.") from err
+            try:
+                err_body = err.read().decode("utf-8", errors="replace")
+                parsed_err = json.loads(err_body)
+                if isinstance(parsed_err, dict):
+                    e_obj = parsed_err.get("error")
+                    if isinstance(e_obj, dict):
+                        detail = str(e_obj.get("message") or "")
+                    elif isinstance(e_obj, str):
+                        detail = e_obj
+            except Exception:
+                detail = ""
+            if err.code in (401, 403):
+                raise RuntimeError("API key was rejected or lacks permission.") from err
+            if err.code == 429:
+                raise RuntimeError("Rate limit reached on the AI provider. Try again shortly.") from err
+            if err.code == 404:
+                raise RuntimeError(f"Model or endpoint was not found (HTTP 404). {detail}".strip()) from err
+            msg = f"AI provider returned HTTP {err.code}."
+            if detail:
+                msg += f" {mask_secrets(detail)[:180]}"
+            raise RuntimeError(msg) from err
+        except urllib.error.URLError as err:
+            if attempt < attempts - 1:
+                time.sleep(2)
+                continue
+            raise RuntimeError(f"Could not reach the AI provider ({err.reason}).") from err
+        except TimeoutError as err:
+            if attempt < attempts - 1:
+                time.sleep(2)
+                continue
+            raise RuntimeError("AI provider timed out before responding.") from err
+        except json.JSONDecodeError as err:
+            raise RuntimeError("AI provider returned invalid JSON.") from err
+        except Exception as err:
+            if attempt < attempts - 1:
+                time.sleep(2)
+                continue
+            raise RuntimeError(f"AI provider connection error ({err}).") from err
+    raise RuntimeError("AI provider did not respond.")
 
 
 def call_provider(
@@ -637,7 +654,15 @@ def call_provider(
                 "responseMimeType": "application/json",
             },
         }
-        data = _http_post_json(url, payload, {"x-goog-api-key": api_key}, timeout=timeout)
+        try:
+            data = _http_post_json(url, payload, {"x-goog-api-key": api_key}, timeout=timeout)
+        except RuntimeError as err:
+            fallback_model = "gemini-2.5-flash-lite"
+            if model != fallback_model and ("503" in str(err) or "429" in str(err) or "high demand" in str(err).lower()):
+                fb_url = f"{root}/v1beta/models/{urllib.parse.quote(fallback_model, safe='')}:generateContent"
+                data = _http_post_json(fb_url, payload, {"x-goog-api-key": api_key}, timeout=timeout)
+            else:
+                raise
         try:
             return str(data["candidates"][0]["content"]["parts"][0]["text"])
         except (KeyError, IndexError, TypeError) as err:
