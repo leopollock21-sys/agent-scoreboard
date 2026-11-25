@@ -978,7 +978,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         <div class="field-group">
           <label class="field-label" for="ajModel">Model Name</label>
-          <input type="text" id="ajModel" placeholder="e.g. gemini-2.5-flash">
+          <input type="text" id="ajModel" placeholder="e.g. gemini-flash-lite-latest">
         </div>
 
         <div class="field-group" id="ajApiKeyGroup">
@@ -1725,7 +1725,7 @@ function updateAjKeyHint() {
 function onAjProviderChange() {
   const provider = document.getElementById("ajProvider").value;
   const defaults = (AJ_CFG && AJ_CFG.provider_defaults) || {
-    gemini: "gemini-2.5-flash",
+    gemini: "gemini-flash-lite-latest",
     openai: "gpt-4o-mini",
     openrouter: "google/gemini-2.5-flash",
     ollama: "llama3.2",

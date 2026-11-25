@@ -30,7 +30,7 @@ from typing import Any
 PROVIDERS: dict[str, dict[str, Any]] = {
     "gemini": {
         "label": "Google Gemini Flash",
-        "default_model": "gemini-2.5-flash",
+        "default_model": "gemini-flash-lite-latest",
         "env_vars": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         "requires_key": True,
     },
@@ -66,7 +66,7 @@ TEST_TIMEOUT_SECONDS = 12
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
     "provider": "gemini",
-    "model": "gemini-2.5-flash",
+    "model": "gemini-flash-lite-latest",
     "api_key": "",
     "mode": "notable_only",
     "use_env_key": True,
