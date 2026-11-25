@@ -1,11 +1,10 @@
 # Agent Scoreboard Project Plan
 
 ## Live Beacon
-- Active release: 1.2.0 public source and unsigned Windows test executable.
+- Active release: 1.3.0 (Auto-Judge hook, provider engine, UI tab, and rebuilt unsigned Windows executable).
 - Canonical branch: `main`.
-- Baseline revision: `b6f97bb1cab96e9ead41a0359c4426a998561f9b`.
-- Current state: GitHub repository is public. Rebuilt and registered the unsigned v1.2.0 EXE as `AgentScoreboard-v1.2.0-rebuilt.exe`; the prior canonical EXE remains open in two running processes and was left untouched. No valid Chinlung code-signing certificate or signtool is available in the current Windows certificate stores. The original v1.2.0 release is immutable; the rebuilt executable is published under `v1.2.0-rebuild-20261122`.
-- Release gates: protect public tunnel routes with an owner-generated bearer token; bound HTTP and proposal input; protect local browser mutations from cross-origin requests; review public source for credentials and private paths.
+- Latest EXE SHA-256: `002118ED793D5A4A0247632FF2F83F432624F7E6E2943E21FA7FB6844406944B` (registered in `OFFICIAL_RELEASES\Agent-Scoreboard\AgentScoreboard.exe`).
+- Release gates: protect public tunnel routes with an owner-generated bearer token; keep `/api/auto-judge/*` strictly local-only and PIN-gated; bound HTTP and proposal input; protect local browser mutations from cross-origin requests; review public source for credentials and private paths.
 
 ## Security Release Checklist
 - [x] Require bearer authentication for tunneled warning and proposal routes.
